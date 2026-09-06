@@ -2,26 +2,36 @@ import { getApp } from "@react-native-firebase/app";
 import {
   getAuth,
   signInWithPhoneNumber,
+  type ConfirmationResult,
 } from "@react-native-firebase/auth";
 
-const app = getApp();
-const auth = getAuth(app);
+const auth = getAuth(getApp());
 
-let confirmationResult: any = null;
+let confirmationResult: ConfirmationResult | null = null;
 
 export const sendOTP = async (phoneNumber: string) => {
   confirmationResult = await signInWithPhoneNumber(
     auth,
     phoneNumber
   );
+
+  console.log("OTP session created");
 };
 
 export const verifyOTP = async (code: string) => {
   if (!confirmationResult) {
-    throw new Error("OTP session expired. Please request a new OTP.");
+    throw new Error(
+      "OTP session not found. Please request a new OTP."
+    );
   }
 
-  const result = await confirmationResult.confirm(code);
+  const cleanCode = code.trim();
+
+  if (!/^\d{6}$/.test(cleanCode)) {
+    throw new Error("Please enter the 6-digit OTP.");
+  }
+
+  const result = await confirmationResult.confirm(cleanCode);
 
   confirmationResult = null;
 

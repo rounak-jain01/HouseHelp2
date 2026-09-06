@@ -1,6 +1,8 @@
-import { useState } from "react";
+import React, { useState } from "react";
 import {
   ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
   StyleSheet,
   Text,
   TextInput,
@@ -8,169 +10,439 @@ import {
   View,
 } from "react-native";
 import { router, useLocalSearchParams } from "expo-router";
+import { getFirestore, doc, getDoc } from "@react-native-firebase/firestore";
 
-import { verifyOTP } from "@/services/auth";
+import { verifyOTP, sendOTP } from "@/services/auth";
 
-export default function OTP() {
-  const { phone } = useLocalSearchParams<{ phone: string }>();
+const db = getFirestore();
 
-  const [otp, setOtp] = useState("");
+export default function OTPScreen() {
+  const { phone, role } = useLocalSearchParams<{
+    phone: string;
+    role: "customer" | "maid";
+  }>();
+
+  const [code, setCode] = useState("");
   const [loading, setLoading] = useState(false);
+  const [resending, setResending] = useState(false);
   const [error, setError] = useState("");
 
   const handleVerify = async () => {
-    setError("");
-
-    if (otp.length !== 6) {
-      setError("Enter the 6-digit OTP");
-      return;
-    }
-
     try {
+      setError("");
+
+      if (!phone) {
+        setError("Phone number is missing. Please login again.");
+        return;
+      }
+
+      if (!role) {
+        setError("Role information is missing. Please login again.");
+        return;
+      }
+
+      if (code.length !== 6) {
+        setError("Please enter the 6-digit OTP.");
+        return;
+      }
+
       setLoading(true);
 
-      await verifyOTP(otp);
+      // Verify OTP with Firebase
+      const firebaseUser = await verifyOTP(code);
 
-      // Temporary: role flow comes next
-      router.replace("/auth/login");
+      console.log(
+        "OTP verified:",
+        firebaseUser.uid,
+        "Role:",
+        role
+      );
+
+      // CUSTOMER FLOW
+      if (role === "customer") {
+        const userRef = doc(
+          db,
+          "users",
+          firebaseUser.uid
+        );
+
+        const userSnapshot = await getDoc(userRef);
+
+        if (userSnapshot.exists()) {
+          console.log("Existing customer found");
+
+          router.replace("/customer");
+          return;
+        }
+
+        console.log("New customer");
+
+        router.replace({
+          pathname: "/customer/profile",
+          params: {
+            phone,
+          },
+        });
+
+        return;
+      }
+
+      // MAID FLOW
+      const maidRef = doc(
+        db,
+        "maids",
+        firebaseUser.uid
+      );
+
+      const maidSnapshot = await getDoc(maidRef);
+
+      if (maidSnapshot.exists()) {
+        console.log("Existing maid found");
+
+        router.replace("/maid");
+        return;
+      }
+
+      console.log("New maid");
+
+      router.replace({
+        pathname: "/maid/profile",
+        params: {
+          phone,
+        },
+      });
     } catch (err: any) {
-      setError(err?.message || "Invalid OTP");
+      console.error("VERIFY OTP ERROR:", err);
+
+      if (err?.code === "auth/invalid-verification-code") {
+        setError(
+          "Invalid OTP. Please check the code and try again."
+        );
+      } else if (err?.code === "auth/code-expired") {
+        setError(
+          "OTP expired. Please request a new OTP."
+        );
+      } else if (err?.code === "firestore/permission-denied") {
+        setError(
+          "Unable to check your account. Please try again."
+        );
+      } else {
+        setError(
+          err?.message ||
+            "Unable to verify OTP. Please try again."
+        );
+      }
     } finally {
       setLoading(false);
     }
   };
 
+  const handleResend = async () => {
+    try {
+      setError("");
+
+      if (!phone) {
+        setError("Phone number is missing.");
+        return;
+      }
+
+      setResending(true);
+
+      await sendOTP(phone);
+
+      setCode("");
+
+      console.log("OTP resent successfully");
+    } catch (err: any) {
+      console.error("RESEND OTP ERROR:", err);
+
+      setError(
+        err?.message ||
+          "Unable to resend OTP. Please try again."
+      );
+    } finally {
+      setResending(false);
+    }
+  };
+
   return (
-    <View style={styles.container}>
-      <View style={styles.content}>
+    <KeyboardAvoidingView
+      style={styles.screen}
+      behavior={
+        Platform.OS === "ios"
+          ? "padding"
+          : undefined
+      }
+    >
+      <View style={styles.container}>
+        {/* Back */}
         <TouchableOpacity
-          onPress={() => router.back()}
           style={styles.backButton}
+          onPress={() => router.back()}
+          disabled={loading || resending}
         >
-          <Text style={styles.backText}>‹</Text>
+          <Text style={styles.backArrow}>‹</Text>
+
+          <Text style={styles.backText}>
+            Back
+          </Text>
         </TouchableOpacity>
 
-        <Text style={styles.title}>Verify your number</Text>
+        {/* Header */}
+        <View style={styles.header}>
+          <View style={styles.logo}>
+            <Text style={styles.logoText}>H</Text>
+          </View>
 
-        <Text style={styles.subtitle}>
-          Enter the 6-digit code sent to{"\n"}
-          <Text style={styles.phone}>{phone}</Text>
+          <Text style={styles.title}>
+            Verify your number
+          </Text>
+
+          <Text style={styles.subtitle}>
+            Enter the 6-digit OTP sent to
+          </Text>
+
+          <Text style={styles.phone}>
+            {phone}
+          </Text>
+        </View>
+
+        {/* OTP Input */}
+        <Text style={styles.label}>
+          OTP
         </Text>
 
         <TextInput
-          style={styles.otpInput}
-          value={otp}
-          onChangeText={setOtp}
-          keyboardType="number-pad"
-          maxLength={6}
-          placeholder="000000"
+          value={code}
+          onChangeText={(text) => {
+            setError("");
+
+            const numbersOnly =
+              text.replace(/\D/g, "");
+
+            setCode(
+              numbersOnly.slice(0, 6)
+            );
+          }}
+          placeholder="Enter OTP"
           placeholderTextColor="#9CA3AF"
-          textAlign="center"
+          keyboardType="number-pad"
+          textContentType="oneTimeCode"
+          autoComplete="sms-otp"
+          maxLength={6}
+          style={[
+            styles.otpInput,
+            error && styles.errorInput,
+          ]}
+          editable={!loading && !resending}
         />
 
-        {error ? <Text style={styles.error}>{error}</Text> : null}
+        {error ? (
+          <Text style={styles.errorText}>
+            {error}
+          </Text>
+        ) : null}
 
+        {/* Verify Button */}
         <TouchableOpacity
-          style={styles.button}
+          style={[
+            styles.verifyButton,
+            (code.length !== 6 ||
+              loading ||
+              resending) &&
+              styles.disabledButton,
+          ]}
           onPress={handleVerify}
-          disabled={loading}
+          disabled={
+            code.length !== 6 ||
+            loading ||
+            resending
+          }
+          activeOpacity={0.85}
         >
           {loading ? (
-            <ActivityIndicator color="#fff" />
+            <ActivityIndicator color="#FFFFFF" />
           ) : (
-            <Text style={styles.buttonText}>Verify OTP</Text>
+            <Text style={styles.verifyText}>
+              Verify OTP
+            </Text>
           )}
         </TouchableOpacity>
 
-        <Text style={styles.resend}>Didn't receive the code? Resend</Text>
+        {/* Resend */}
+        <TouchableOpacity
+          style={styles.resendButton}
+          onPress={handleResend}
+          disabled={loading || resending}
+        >
+          {resending ? (
+            <ActivityIndicator />
+          ) : (
+            <Text style={styles.resendText}>
+              Resend OTP
+            </Text>
+          )}
+        </TouchableOpacity>
+
+        {/* Role */}
+        <Text style={styles.roleText}>
+          Signing in as{" "}
+          <Text style={styles.roleBold}>
+            {role === "maid"
+              ? "Helper"
+              : "Customer"}
+          </Text>
+        </Text>
       </View>
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  screen: {
     flex: 1,
     backgroundColor: "#FFFFFF",
   },
 
-  content: {
+  container: {
     flex: 1,
-    paddingHorizontal: 24,
-    paddingTop: 60,
+    paddingHorizontal: 22,
+    paddingTop: 28,
   },
 
   backButton: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: "#F3F4F6",
+    flexDirection: "row",
     alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 50,
+    alignSelf: "flex-start",
+    paddingVertical: 8,
+  },
+
+  backArrow: {
+    fontSize: 30,
+    lineHeight: 30,
+    color: "#111827",
   },
 
   backText: {
-    fontSize: 32,
-    color: "#111827",
-    marginTop: -4,
+    marginLeft: 4,
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#374151",
+  },
+
+  header: {
+    marginTop: 54,
+    alignItems: "center",
+  },
+
+  logo: {
+    width: 62,
+    height: 62,
+    borderRadius: 18,
+    marginBottom: 22,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#111827",
+  },
+
+  logoText: {
+    fontSize: 31,
+    fontWeight: "700",
+    color: "#FFFFFF",
   },
 
   title: {
     fontSize: 28,
-    fontWeight: "700",
+    fontWeight: "800",
     color: "#111827",
+    textAlign: "center",
   },
 
   subtitle: {
-    fontSize: 15,
+    marginTop: 10,
+    fontSize: 14,
     color: "#6B7280",
-    lineHeight: 23,
-    marginTop: 12,
-    marginBottom: 32,
+    textAlign: "center",
   },
 
   phone: {
+    marginTop: 5,
+    fontSize: 16,
+    fontWeight: "700",
     color: "#111827",
-    fontWeight: "600",
+  },
+
+  label: {
+    marginTop: 48,
+    marginBottom: 9,
+    fontSize: 15,
+    fontWeight: "700",
+    color: "#374151",
   },
 
   otpInput: {
-    height: 64,
+    height: 60,
     borderWidth: 1,
     borderColor: "#D1D5DB",
     borderRadius: 14,
-    fontSize: 24,
-    fontWeight: "700",
-    letterSpacing: 8,
+    backgroundColor: "#FFFFFF",
+    paddingHorizontal: 18,
+    fontSize: 23,
+    fontWeight: "600",
+    letterSpacing: 7,
     color: "#111827",
+    textAlign: "center",
   },
 
-  error: {
-    color: "#DC2626",
+  errorInput: {
+    borderColor: "#EF4444",
+  },
+
+  errorText: {
+    marginTop: 9,
     fontSize: 13,
-    marginTop: 8,
+    color: "#EF4444",
   },
 
-  button: {
-    height: 56,
-    backgroundColor: "#111827",
+  verifyButton: {
+    height: 58,
+    marginTop: 24,
     borderRadius: 14,
+    backgroundColor: "#111827",
     alignItems: "center",
     justifyContent: "center",
-    marginTop: 24,
   },
 
-  buttonText: {
-    color: "#FFFFFF",
+  disabledButton: {
+    opacity: 0.4,
+  },
+
+  verifyText: {
     fontSize: 16,
     fontWeight: "700",
+    color: "#FFFFFF",
   },
 
-  resend: {
-    textAlign: "center",
-    color: "#6B7280",
-    fontSize: 14,
+  resendButton: {
     marginTop: 22,
+    alignItems: "center",
+  },
+
+  resendText: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: "#2563EB",
+  },
+
+  roleText: {
+    marginTop: 28,
+    textAlign: "center",
+    fontSize: 13,
+    color: "#94A3B8",
+  },
+
+  roleBold: {
+    fontWeight: "700",
+    color: "#475569",
   },
 });

@@ -1,32 +1,194 @@
-/**
- * Import function triggers from their respective submodules:
- *
- * import {onCall} from "firebase-functions/v2/https";
- * import {onDocumentWritten} from "firebase-functions/v2/firestore";
- *
- * See a full list of supported triggers at https://firebase.google.com/docs/functions
- */
+import { setGlobalOptions } from "firebase-functions";
+import { onDocumentCreated } from "firebase-functions/v2/firestore";
+import { initializeApp } from "firebase-admin/app";
+import {
+  getFirestore,
+  FieldValue,
+} from "firebase-admin/firestore";
 
-import {setGlobalOptions} from "firebase-functions";
-// import {onRequest} from "firebase-functions/https";
-// import * as logger from "firebase-functions/logger";
+initializeApp();
 
-// Start writing functions
-// https://firebase.google.com/docs/functions/typescript
+setGlobalOptions({
+  maxInstances: 10,
+});
 
-// For cost control, you can set the maximum number of containers that can be
-// running at the same time. This helps mitigate the impact of unexpected
-// traffic spikes by instead downgrading performance. This limit is a
-// per-function limit. You can override the limit for each function using the
-// `maxInstances` option in the function's options, e.g.
-// `onRequest({ maxInstances: 5 }, (req, res) => { ... })`.
-// NOTE: setGlobalOptions does not apply to functions using the v1 API. V1
-// functions should each use functions.runWith({ maxInstances: 10 }) instead.
-// In the v1 API, each function can only serve one request per container, so
-// this will be the maximum concurrent request count.
-setGlobalOptions({maxInstances: 10});
+type Booking = {
+  customerId: string;
+  maidId?: string | null;
+  categories: string[];
+  duration: number;
+  scheduledDateTime: FirebaseFirestore.Timestamp;
+  status: string;
+};
 
-// export const helloWorld = onRequest((request, response) => {
-//   logger.info("Hello logs!", {structuredData: true});
-//   response.send("Hello from Firebase!");
-// });
+type Maid = {
+  maidId: string;
+  name?: string;
+  verificationStatus?: string;
+  serviceCategories?: string[];
+  isAvailableNow?: boolean;
+  lastAssignedAt?: FirebaseFirestore.Timestamp | null;
+};
+
+const normalize = (value: string) => {
+  return value.trim().toLowerCase();
+};
+
+export const assignMaid = onDocumentCreated(
+  "bookings/{bookingId}",
+  async (event) => {
+    const bookingId = event.params.bookingId;
+
+    const booking = event.data?.data() as Booking | undefined;
+
+    if (!booking) {
+      console.log("No booking data found.");
+      return;
+    }
+
+    console.log("=================================");
+    console.log("NEW BOOKING:", bookingId);
+    console.log("Booking categories:", booking.categories);
+    console.log("=================================");
+
+    const db = getFirestore();
+
+    // Get all maids.
+    const maidsSnapshot = await db
+      .collection("maids")
+      .get();
+
+    if (maidsSnapshot.empty) {
+      console.log("No maids found.");
+
+      await db.collection("bookings").doc(bookingId).update({
+        status: "no_maid_found",
+      });
+
+      return;
+    }
+
+    const eligibleMaids: Maid[] = [];
+
+    maidsSnapshot.forEach((maidDoc) => {
+      const maid = {
+        maidId: maidDoc.id,
+        ...maidDoc.data(),
+      } as Maid;
+
+      const verified =
+        maid.verificationStatus === "verified";
+
+      const available =
+        maid.isAvailableNow === true;
+
+      const maidCategories =
+        maid.serviceCategories || [];
+
+      const categoryMatch =
+        (booking.categories || []).every(
+          (bookingCategory) =>
+            maidCategories.some(
+              (maidCategory) =>
+                normalize(maidCategory) ===
+                normalize(bookingCategory)
+            )
+        );
+
+      console.log("MAID CHECK:", {
+        maidId: maid.maidId,
+        name: maid.name,
+        verified,
+        available,
+        maidCategories,
+        bookingCategories: booking.categories,
+        categoryMatch,
+      });
+
+      if (
+        verified &&
+        available &&
+        categoryMatch
+      ) {
+        eligibleMaids.push(maid);
+      }
+    });
+
+    if (eligibleMaids.length === 0) {
+      console.log("NO ELIGIBLE MAID FOUND");
+
+      await db.collection("bookings").doc(bookingId).update({
+        status: "no_maid_found",
+      });
+
+      return;
+    }
+
+    // Least recently assigned maid gets priority.
+    eligibleMaids.sort((a, b) => {
+      const aTime =
+        a.lastAssignedAt?.toMillis() ?? 0;
+
+      const bTime =
+        b.lastAssignedAt?.toMillis() ?? 0;
+
+      return aTime - bTime;
+    });
+
+    const selectedMaid = eligibleMaids[0];
+
+    console.log(
+      "SELECTED MAID:",
+      selectedMaid.maidId,
+      selectedMaid.name
+    );
+
+    const bookingRef =
+      db.collection("bookings").doc(bookingId);
+
+    const maidRef =
+      db.collection("maids").doc(selectedMaid.maidId);
+
+    await db.runTransaction(async (transaction) => {
+      const bookingSnapshot =
+        await transaction.get(bookingRef);
+
+      if (!bookingSnapshot.exists) {
+        throw new Error(
+          "Booking no longer exists."
+        );
+      }
+
+      const currentBooking =
+        bookingSnapshot.data();
+
+      if (
+        currentBooking?.status !== "pending"
+      ) {
+        console.log(
+          "Booking is no longer pending."
+        );
+        return;
+      }
+
+      transaction.update(bookingRef, {
+        maidId: selectedMaid.maidId,
+        status: "assigned",
+        assignedAt:
+          FieldValue.serverTimestamp(),
+      });
+
+      transaction.update(maidRef, {
+        lastAssignedAt:
+          FieldValue.serverTimestamp(),
+      });
+    });
+
+    console.log(
+      "BOOKING ASSIGNED SUCCESSFULLY:",
+      bookingId,
+      "→",
+      selectedMaid.maidId
+    );
+  }
+);
