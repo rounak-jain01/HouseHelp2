@@ -1,7 +1,18 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
+  registerFCMToken,
+  listenForTokenRefresh,
+  listenForNotifications,
+  listenForForegroundPush,
+  createNotificationChannel,
+  requestNotificationPermission,
+  AppNotification,
+} from "@/services/notifications";
+
+import {
   ActivityIndicator,
   Alert,
+  Modal,
   Pressable,
   ScrollView,
   StatusBar,
@@ -9,10 +20,12 @@ import {
   Text,
   View,
 } from "react-native";
+
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
 
 import { getAuth } from "@react-native-firebase/auth";
+
 import {
   collection,
   doc,
@@ -24,6 +37,11 @@ import {
   where,
 } from "@react-native-firebase/firestore";
 
+
+// ============================================================
+// TYPES
+// ============================================================
+
 type AvailabilitySlot = {
   id: string;
   date: string;
@@ -31,13 +49,22 @@ type AvailabilitySlot = {
   endTime: string;
 };
 
-type AvailabilityOverride = "manual_off" | "manual_on" | null;
+type AvailabilityOverride =
+  | "manual_off"
+  | "manual_on"
+  | null;
 
 type MaidData = {
   name?: string;
   phoneNumber?: string;
-  verificationStatus?: "pending" | "verified" | "rejected";
+
+  verificationStatus?:
+    | "pending"
+    | "verified"
+    | "rejected";
+
   serviceCategories?: string[];
+
   serviceArea?: string;
 
   isAvailableNow?: boolean;
@@ -47,16 +74,23 @@ type MaidData = {
   availabilityOverride?: AvailabilityOverride;
 };
 
+
+// ============================================================
+// FIREBASE
+// ============================================================
+
 const auth = getAuth();
 const db = getFirestore();
 
-/* --------------------------------------------------
-   Helpers
--------------------------------------------------- */
+
+// ============================================================
+// HELPERS
+// ============================================================
 
 const pad = (value: number) => {
   return value.toString().padStart(2, "0");
 };
+
 
 const getDateKey = (date: Date) => {
   return `${date.getFullYear()}-${pad(
@@ -64,15 +98,19 @@ const getDateKey = (date: Date) => {
   )}-${pad(date.getDate())}`;
 };
 
+
 const getMinutes = (time: string) => {
-  const [hours, minutes] = time.split(":").map(Number);
+  const [hours, minutes] = time
+    .split(":")
+    .map(Number);
 
   return hours * 60 + minutes;
 };
 
-/* --------------------------------------------------
-   Dynamic Greeting
--------------------------------------------------- */
+
+// ============================================================
+// DYNAMIC GREETING
+// ============================================================
 
 const getGreeting = () => {
   const hour = new Date().getHours();
@@ -92,9 +130,10 @@ const getGreeting = () => {
   return "Good night";
 };
 
-/* --------------------------------------------------
-   Availability Helpers
--------------------------------------------------- */
+
+// ============================================================
+// AVAILABILITY HELPERS
+// ============================================================
 
 const getActiveAvailabilitySlot = (
   slots: AvailabilitySlot[] = [],
@@ -103,7 +142,8 @@ const getActiveAvailabilitySlot = (
   const today = getDateKey(now);
 
   const currentMinutes =
-    now.getHours() * 60 + now.getMinutes();
+    now.getHours() * 60 +
+    now.getMinutes();
 
   return slots.find((slot) => {
     if (slot.date !== today) {
@@ -120,14 +160,16 @@ const getActiveAvailabilitySlot = (
   });
 };
 
+
 const calculateAvailability = (
   maidData: MaidData,
   now = new Date(),
 ) => {
-  const activeSlot = getActiveAvailabilitySlot(
-    maidData.availabilitySlots || [],
-    now,
-  );
+  const activeSlot =
+    getActiveAvailabilitySlot(
+      maidData.availabilitySlots || [],
+      now,
+    );
 
   const override =
     maidData.availabilityOverride ?? null;
@@ -152,9 +194,10 @@ const calculateAvailability = (
   return override === "manual_on";
 };
 
-/* --------------------------------------------------
-   Maid Home
--------------------------------------------------- */
+
+// ============================================================
+// MAID HOME
+// ============================================================
 
 export default function MaidHome() {
   const [maid, setMaid] =
@@ -166,15 +209,22 @@ export default function MaidHome() {
   const [isAvailable, setIsAvailable] =
     useState(false);
 
+  const [notifications, setNotifications] =
+    useState<AppNotification[]>([]);
+
+  const [showNotifications, setShowNotifications] =
+    useState(false);
+
   const [greeting, setGreeting] =
     useState(getGreeting());
 
   const openedBookingIdRef =
     useRef<string | null>(null);
 
-  /* --------------------------------------------------
-     Dynamic Greeting Effect
-  -------------------------------------------------- */
+
+  // ==========================================================
+  // DYNAMIC GREETING EFFECT
+  // ==========================================================
 
   useEffect(() => {
     const updateGreeting = () => {
@@ -193,9 +243,47 @@ export default function MaidHome() {
     };
   }, []);
 
-  /* --------------------------------------------------
-     Load Maid Data
-  -------------------------------------------------- */
+
+  // ==========================================================
+  // REALTIME IN-APP NOTIFICATIONS
+  // ==========================================================
+
+  useEffect(() => {
+    const user = auth.currentUser;
+
+    if (!user) {
+      console.log(
+        "MAID NOTIFICATIONS: NO AUTH USER",
+      );
+      return;
+    }
+
+    console.log(
+      "MAID NOTIFICATIONS: LISTENER STARTING FOR",
+      user.uid,
+    );
+
+    const unsubscribe =
+      listenForNotifications(
+        user.uid,
+        "maid",
+        (items) => {
+          console.log(
+            "MAID IN-APP NOTIFICATIONS:",
+            items,
+          );
+
+          setNotifications(items);
+        },
+      );
+
+    return unsubscribe;
+  }, []);
+
+
+  // ==========================================================
+  // LOAD MAID DATA + NOTIFICATIONS + BOOKING LISTENER
+  // ==========================================================
 
   useEffect(() => {
     let unsubscribeMaid:
@@ -210,6 +298,15 @@ export default function MaidHome() {
       | (() => void)
       | undefined;
 
+    let unsubscribeTokenRefresh:
+      | (() => void)
+      | undefined;
+
+    let unsubscribeForegroundPush:
+      | (() => void)
+      | undefined;
+
+
     const setup = async () => {
       const user = auth.currentUser;
 
@@ -218,7 +315,68 @@ export default function MaidHome() {
         return;
       }
 
+
+      // ------------------------------------------------------
+      // NOTIFICATION SETUP
+      // ------------------------------------------------------
+
       try {
+        console.log(
+          "MAID NOTIFICATION: REQUESTING PERMISSION",
+        );
+
+        await requestNotificationPermission();
+
+        console.log(
+          "MAID NOTIFICATION: PERMISSION READY",
+        );
+
+        await createNotificationChannel();
+
+        console.log(
+          "MAID NOTIFICATION: CHANNEL READY",
+        );
+
+        const token = await registerFCMToken(
+          user.uid,
+          "maid",
+        );
+
+        if (token) {
+          console.log(
+            "MAID FCM TOKEN REGISTERED",
+          );
+        } else {
+          console.log(
+            "MAID FCM TOKEN REGISTRATION FAILED",
+          );
+        }
+
+        unsubscribeTokenRefresh =
+          listenForTokenRefresh(
+            user.uid,
+            "maid",
+          );
+
+        unsubscribeForegroundPush =
+          listenForForegroundPush();
+
+        console.log(
+          "MAID FOREGROUND PUSH LISTENER READY",
+        );
+      } catch (error) {
+        console.error(
+          "MAID NOTIFICATION SETUP ERROR:",
+          error,
+        );
+      }
+
+
+      try {
+        // ----------------------------------------------------
+        // MAID DOCUMENT
+        // ----------------------------------------------------
+
         const maidRef = doc(
           db,
           "maids",
@@ -228,26 +386,33 @@ export default function MaidHome() {
         const maidSnapshot =
           await getDoc(maidRef);
 
-        /* ------------------------------------------
-           Maid document does not exist
-        ------------------------------------------ */
+
+        // ----------------------------------------------------
+        // MAID DOCUMENT DOES NOT EXIST
+        // ----------------------------------------------------
 
         if (!maidSnapshot.exists()) {
           router.replace({
             pathname: "/maid/profile",
             params: {
-              phone: user.phoneNumber || "",
+              phone:
+                user.phoneNumber || "",
             },
           });
 
           return;
         }
 
+
         const initialData =
           maidSnapshot.data() as MaidData;
 
+
         const initialAvailability =
-          calculateAvailability(initialData);
+          calculateAvailability(
+            initialData,
+          );
+
 
         setMaid({
           ...initialData,
@@ -255,30 +420,37 @@ export default function MaidHome() {
             initialAvailability,
         });
 
+
         setIsAvailable(
           initialAvailability,
         );
 
+
         setLoading(false);
 
-        /* ------------------------------------------
-           Maid Realtime Listener
-        ------------------------------------------ */
+
+        // ----------------------------------------------------
+        // MAID REALTIME LISTENER
+        // ----------------------------------------------------
 
         unsubscribeMaid = onSnapshot(
           maidRef,
+
           async (snapshot) => {
             if (!snapshot.exists()) {
               return;
             }
 
+
             const maidData =
               snapshot.data() as MaidData;
+
 
             const effectiveAvailability =
               calculateAvailability(
                 maidData,
               );
+
 
             setMaid({
               ...maidData,
@@ -286,9 +458,11 @@ export default function MaidHome() {
                 effectiveAvailability,
             });
 
+
             setIsAvailable(
               effectiveAvailability,
             );
+
 
             /*
              * Keep Firestore availability
@@ -315,6 +489,7 @@ export default function MaidHome() {
               }
             }
           },
+
           (error) => {
             console.error(
               "MAID LISTENER ERROR:",
@@ -323,11 +498,11 @@ export default function MaidHome() {
           },
         );
 
-        /* ------------------------------------------
-           Automatic Availability Check
 
-           Every 30 seconds
-        ------------------------------------------ */
+        // ----------------------------------------------------
+        // AUTOMATIC AVAILABILITY CHECK
+        // Every 30 seconds
+        // ----------------------------------------------------
 
         const availabilityInterval =
           setInterval(async () => {
@@ -335,19 +510,23 @@ export default function MaidHome() {
               const latestSnapshot =
                 await getDoc(maidRef);
 
+
               if (
                 !latestSnapshot.exists()
               ) {
                 return;
               }
 
+
               const latestData =
                 latestSnapshot.data() as MaidData;
+
 
               const effectiveAvailability =
                 calculateAvailability(
                   latestData,
                 );
+
 
               setMaid({
                 ...latestData,
@@ -355,9 +534,11 @@ export default function MaidHome() {
                   effectiveAvailability,
               });
 
+
               setIsAvailable(
                 effectiveAvailability,
               );
+
 
               if (
                 latestData.isAvailableNow !==
@@ -378,6 +559,7 @@ export default function MaidHome() {
                   );
                 }
               }
+
             } catch (error) {
               console.error(
                 "AVAILABILITY CHECK ERROR:",
@@ -386,49 +568,61 @@ export default function MaidHome() {
             }
           }, 30 * 1000);
 
+
         cleanupInterval = () => {
           clearInterval(
             availabilityInterval,
           );
         };
 
-        /* ------------------------------------------
-           Booking Listener
 
-           Only verified maids
-        ------------------------------------------ */
+        // ----------------------------------------------------
+        // BOOKING LISTENER
+        //
+        // Only verified maids
+        // ----------------------------------------------------
 
         if (
           initialData.verificationStatus ===
           "verified"
         ) {
-          const bookingsQuery = query(
-            collection(db, "bookings"),
-            where(
-              "maidId",
-              "==",
-              user.uid,
-            ),
-          );
+          const bookingsQuery =
+            query(
+              collection(
+                db,
+                "bookings",
+              ),
+              where(
+                "maidId",
+                "==",
+                user.uid,
+              ),
+            );
+
 
           unsubscribeBookings =
             onSnapshot(
               bookingsQuery,
+
               (snapshot) => {
                 const assignedBooking =
                   snapshot.docs.find(
                     (bookingDoc) =>
-                      bookingDoc.data()
+                      bookingDoc
+                        .data()
                         ?.status ===
                       "assigned",
                   );
+
 
                 if (!assignedBooking) {
                   return;
                 }
 
+
                 const bookingId =
                   assignedBooking.id;
+
 
                 /*
                  * Prevent opening the same
@@ -442,17 +636,21 @@ export default function MaidHome() {
                   return;
                 }
 
+
                 openedBookingIdRef.current =
                   bookingId;
+
 
                 router.push({
                   pathname:
                     "/maid/booking-request",
+
                   params: {
                     bookingId,
                   },
                 });
               },
+
               (error) => {
                 console.error(
                   "BOOKING LISTENER ERROR:",
@@ -461,6 +659,7 @@ export default function MaidHome() {
               },
             );
         }
+
       } catch (error) {
         console.error(
           "MAID HOME ERROR:",
@@ -471,34 +670,44 @@ export default function MaidHome() {
       }
     };
 
+
     setup();
+
 
     return () => {
       unsubscribeMaid?.();
       unsubscribeBookings?.();
       cleanupInterval?.();
+      unsubscribeTokenRefresh?.();
+      unsubscribeForegroundPush?.();
     };
+
   }, []);
 
-  /* --------------------------------------------------
-     Verification
-  -------------------------------------------------- */
+
+  // ==========================================================
+  // VERIFICATION
+  // ==========================================================
 
   const verificationStatus =
-    maid?.verificationStatus ?? "pending";
+    maid?.verificationStatus ??
+    "pending";
+
 
   const isVerified =
     verificationStatus === "verified";
 
-  /* --------------------------------------------------
-     Availability Toggle
-  -------------------------------------------------- */
+
+  // ==========================================================
+  // AVAILABILITY TOGGLE
+  // ==========================================================
 
   const handleAvailabilityPress =
     async () => {
       if (!isVerified) {
         return;
       }
+
 
       const user = auth.currentUser;
 
@@ -507,11 +716,13 @@ export default function MaidHome() {
         return;
       }
 
+
       const maidRef = doc(
         db,
         "maids",
         user.uid,
       );
+
 
       const currentData = maid;
 
@@ -519,7 +730,9 @@ export default function MaidHome() {
         return;
       }
 
+
       const now = new Date();
+
 
       const activeSlot =
         getActiveAvailabilitySlot(
@@ -528,12 +741,15 @@ export default function MaidHome() {
           now,
         );
 
+
       const newAvailability =
         !isAvailable;
+
 
       let availabilityOverride:
         | AvailabilityOverride
         | undefined;
+
 
       /*
        * Scheduled slot active
@@ -544,6 +760,7 @@ export default function MaidHome() {
           newAvailability
             ? null
             : "manual_off";
+
       } else {
         /*
          * Outside scheduled slot
@@ -555,6 +772,7 @@ export default function MaidHome() {
             : null;
       }
 
+
       /*
        * Update UI immediately
        */
@@ -563,24 +781,32 @@ export default function MaidHome() {
         newAvailability,
       );
 
+
       setMaid((previous) =>
         previous
           ? {
               ...previous,
+
               isAvailableNow:
                 newAvailability,
+
               availabilityOverride,
             }
           : previous,
       );
 
-      try {
-        await updateDoc(maidRef, {
-          isAvailableNow:
-            newAvailability,
 
-          availabilityOverride,
-        });
+      try {
+        await updateDoc(
+          maidRef,
+          {
+            isAvailableNow:
+              newAvailability,
+
+            availabilityOverride,
+          },
+        );
+
 
         console.log(
           "AVAILABILITY UPDATED:",
@@ -588,11 +814,13 @@ export default function MaidHome() {
           "override:",
           availabilityOverride,
         );
+
       } catch (error) {
         console.error(
           "AVAILABILITY UPDATE ERROR:",
           error,
         );
+
 
         /*
          * Rollback UI
@@ -602,10 +830,12 @@ export default function MaidHome() {
           !newAvailability,
         );
 
+
         setMaid((previous) =>
           previous
             ? {
                 ...previous,
+
                 isAvailableNow:
                   !newAvailability,
               }
@@ -614,9 +844,10 @@ export default function MaidHome() {
       }
     };
 
-  /* --------------------------------------------------
-     Upcoming Availability
-  -------------------------------------------------- */
+
+  // ==========================================================
+  // UPCOMING AVAILABILITY
+  // ==========================================================
 
   const handleUpcomingAvailabilityPress =
     () => {
@@ -642,14 +873,16 @@ export default function MaidHome() {
         return;
       }
 
+
       router.push(
         "/maid/availability",
       );
     };
 
-  /* --------------------------------------------------
-     Bookings
-  -------------------------------------------------- */
+
+  // ==========================================================
+  // BOOKINGS
+  // ==========================================================
 
   const handleBookingPress = () => {
     if (!isVerified) {
@@ -674,36 +907,62 @@ export default function MaidHome() {
       return;
     }
 
-    router.push("/maid/bookings");
-  };
 
-  /* --------------------------------------------------
-     Navigation
-  -------------------------------------------------- */
-
-  const handleProfilePress = () => {
-    router.push("/maid/profile");
-  };
-
-  const handleHistoryPress = () => {
-    router.push("/maid/job-history");
-  };
-
-  const handleServicesPress = () => {
-    Alert.alert(
-      "Coming Next",
-      "Services screen will be connected next.",
+    router.push(
+      "/maid/bookings",
     );
   };
 
-  /* --------------------------------------------------
-     Loading
-  -------------------------------------------------- */
+
+  // ==========================================================
+  // NAVIGATION
+  // ==========================================================
+
+  const handleProfilePress =
+    () => {
+      router.push(
+        "/maid/profile",
+      );
+    };
+
+
+  const handleHistoryPress =
+    () => {
+      router.push(
+        "/maid/job-history",
+      );
+    };
+
+
+  const handleServicesPress =
+    () => {
+      Alert.alert(
+        "Coming Next",
+        "Services screen will be connected next.",
+      );
+    };
+
+
+  // ==========================================================
+  // NOTIFICATION COUNT
+  // ==========================================================
+
+  const unreadCount =
+    notifications.filter(
+      (notification) => !notification.isRead,
+    ).length;
+
+
+  // ==========================================================
+  // LOADING
+  // ==========================================================
 
   if (loading) {
     return (
       <SafeAreaView
-        style={styles.loadingContainer}
+        style={
+          styles.loadingContainer
+        }
         edges={["top", "bottom"]}
       >
         <StatusBar
@@ -712,20 +971,27 @@ export default function MaidHome() {
           barStyle="dark-content"
         />
 
+
         <ActivityIndicator
           size="large"
         />
 
-        <Text style={styles.loadingText}>
+
+        <Text
+          style={
+            styles.loadingText
+          }
+        >
           Loading your dashboard...
         </Text>
       </SafeAreaView>
     );
   }
 
-  /* --------------------------------------------------
-     UI
-  -------------------------------------------------- */
+
+  // ==========================================================
+  // UI
+  // ==========================================================
 
   return (
     <SafeAreaView
@@ -738,6 +1004,7 @@ export default function MaidHome() {
         barStyle="dark-content"
       />
 
+
       <ScrollView
         contentContainerStyle={
           styles.scrollContent
@@ -746,39 +1013,76 @@ export default function MaidHome() {
           false
         }
       >
-        {/* Header */}
 
-        <View style={styles.header}>
+        {/* ==================================================
+            HEADER
+        ================================================== */}
+
+        <View
+          style={styles.header}
+        >
           <View>
-            <Text style={styles.smallTitle}>
+            <Text
+              style={
+                styles.smallTitle
+              }
+            >
               {greeting}
             </Text>
 
-            <Text style={styles.name}>
+
+            <Text
+              style={styles.name}
+            >
               {maid?.name || "Maid"}
             </Text>
           </View>
 
-          <Pressable
-            style={styles.profileButton}
-            onPress={
-              handleProfilePress
-            }
-          >
-            <Text
-              style={styles.profileIcon}
+
+          <View style={styles.headerActions}>
+            <Pressable
+              style={styles.notificationButton}
+              onPress={() =>
+                setShowNotifications(true)
+              }
             >
-              👤
-            </Text>
-          </Pressable>
+              <Text style={styles.notificationIcon}>
+                🔔
+              </Text>
+
+              {unreadCount > 0 ? (
+                <View style={styles.notificationBadge}>
+                  <Text style={styles.notificationBadgeText}>
+                    {unreadCount > 9
+                      ? "9+"
+                      : unreadCount}
+                  </Text>
+                </View>
+              ) : null}
+            </Pressable>
+
+            <Pressable
+              style={styles.profileButton}
+              onPress={handleProfilePress}
+            >
+              <Text style={styles.profileIcon}>
+                👤
+              </Text>
+            </Pressable>
+          </View>
         </View>
 
-        {/* Verification Pending */}
+
+        {/* ==================================================
+            VERIFICATION PENDING
+        ================================================== */}
 
         {verificationStatus ===
           "pending" && (
           <View
-            style={styles.warningCard}
+            style={
+              styles.warningCard
+            }
           >
             <View
               style={
@@ -786,30 +1090,42 @@ export default function MaidHome() {
               }
             >
               <Text
-                style={styles.warningIcon}
+                style={
+                  styles.warningIcon
+                }
               >
                 !
               </Text>
             </View>
 
+
             <View
-              style={styles.warningContent}
+              style={
+                styles.warningContent
+              }
             >
               <Text
-                style={styles.warningTitle}
+                style={
+                  styles.warningTitle
+                }
               >
                 Verification Pending
               </Text>
 
+
               <Text
-                style={styles.warningText}
+                style={
+                  styles.warningText
+                }
               >
                 Your profile is under
                 verification. You can
                 explore the app, but
-                bookings will be available
-                after verification.
+                bookings will be
+                available after
+                verification.
               </Text>
+
 
               <Pressable
                 style={
@@ -831,12 +1147,17 @@ export default function MaidHome() {
           </View>
         )}
 
-        {/* Verification Rejected */}
+
+        {/* ==================================================
+            VERIFICATION REJECTED
+        ================================================== */}
 
         {verificationStatus ===
           "rejected" && (
           <View
-            style={styles.rejectedCard}
+            style={
+              styles.rejectedCard
+            }
           >
             <View
               style={
@@ -844,29 +1165,40 @@ export default function MaidHome() {
               }
             >
               <Text
-                style={styles.rejectedIcon}
+                style={
+                  styles.rejectedIcon
+                }
               >
                 !
               </Text>
             </View>
 
+
             <View
-              style={styles.warningContent}
+              style={
+                styles.warningContent
+              }
             >
               <Text
-                style={styles.rejectedTitle}
+                style={
+                  styles.rejectedTitle
+                }
               >
                 Verification Rejected
               </Text>
 
+
               <Text
-                style={styles.warningText}
+                style={
+                  styles.warningText
+                }
               >
                 Your verification needs
                 attention. Open your
                 profile to review and
                 update your details.
               </Text>
+
 
               <Pressable
                 style={
@@ -888,12 +1220,17 @@ export default function MaidHome() {
           </View>
         )}
 
-        {/* Verified */}
+
+        {/* ==================================================
+            VERIFIED
+        ================================================== */}
 
         {verificationStatus ===
           "verified" && (
           <View
-            style={styles.verifiedCard}
+            style={
+              styles.verifiedCard
+            }
           >
             <View
               style={
@@ -901,41 +1238,59 @@ export default function MaidHome() {
               }
             >
               <Text
-                style={styles.verifiedIcon}
+                style={
+                  styles.verifiedIcon
+                }
               >
                 ✓
               </Text>
             </View>
 
+
             <View
-              style={styles.verifiedContent}
+              style={
+                styles.verifiedContent
+              }
             >
               <Text
-                style={styles.verifiedTitle}
+                style={
+                  styles.verifiedTitle
+                }
               >
                 You're Verified
               </Text>
 
+
               <Text
-                style={styles.verifiedText}
+                style={
+                  styles.verifiedText
+                }
               >
-                Your account is ready to
-                receive bookings.
+                Your account is ready
+                to receive bookings.
               </Text>
             </View>
           </View>
         )}
 
-        {/* Availability */}
+
+        {/* ==================================================
+            AVAILABILITY HEADER
+        ================================================== */}
 
         <View
-          style={styles.sectionHeader}
+          style={
+            styles.sectionHeader
+          }
         >
           <Text
-            style={styles.sectionTitle}
+            style={
+              styles.sectionTitle
+            }
           >
             Availability
           </Text>
+
 
           <Text
             style={[
@@ -951,7 +1306,10 @@ export default function MaidHome() {
           </Text>
         </View>
 
-        {/* Available Now */}
+
+        {/* ==================================================
+            AVAILABLE NOW
+        ================================================== */}
 
         <Pressable
           style={[
@@ -964,7 +1322,9 @@ export default function MaidHome() {
           }
         >
           <View
-            style={styles.availabilityLeft}
+            style={
+              styles.availabilityLeft
+            }
           >
             <View
               style={[
@@ -974,6 +1334,7 @@ export default function MaidHome() {
                   : styles.statusDotInactive,
               ]}
             />
+
 
             <View>
               <Text
@@ -986,6 +1347,7 @@ export default function MaidHome() {
                   : "You're offline"}
               </Text>
 
+
               <Text
                 style={
                   styles.availabilitySubtitle
@@ -997,6 +1359,7 @@ export default function MaidHome() {
               </Text>
             </View>
           </View>
+
 
           <View
             style={[
@@ -1015,7 +1378,10 @@ export default function MaidHome() {
           </View>
         </Pressable>
 
-        {/* Upcoming Availability */}
+
+        {/* ==================================================
+            UPCOMING AVAILABILITY
+        ================================================== */}
 
         <Pressable
           style={
@@ -1031,47 +1397,66 @@ export default function MaidHome() {
             }
           >
             <Text
-              style={styles.upcomingIcon}
+              style={
+                styles.upcomingIcon
+              }
             >
               📅
             </Text>
           </View>
 
+
           <View
-            style={styles.upcomingContent}
+            style={
+              styles.upcomingContent
+            }
           >
             <Text
-              style={styles.upcomingTitle}
+              style={
+                styles.upcomingTitle
+              }
             >
               Set Upcoming Availability
             </Text>
+
 
             <Text
               style={
                 styles.upcomingSubtitle
               }
             >
-              Choose dates and time slots
-              for future bookings
+              Choose dates and time
+              slots for future bookings
             </Text>
           </View>
 
-          <Text style={styles.arrow}>
+
+          <Text
+            style={styles.arrow}
+          >
             ›
           </Text>
         </Pressable>
 
-        {/* Bookings */}
+
+        {/* ==================================================
+            BOOKINGS
+        ================================================== */}
 
         <View
-          style={styles.sectionHeader}
+          style={
+            styles.sectionHeader
+          }
         >
           <Text
-            style={styles.sectionTitle}
+            style={
+              styles.sectionTitle
+            }
           >
             Bookings
           </Text>
         </View>
+
 
         <Pressable
           style={[
@@ -1089,23 +1474,33 @@ export default function MaidHome() {
             }
           >
             <Text
-              style={styles.bookingIcon}
+              style={
+                styles.bookingIcon
+              }
             >
               📋
             </Text>
           </View>
 
+
           <View
-            style={styles.bookingContent}
+            style={
+              styles.bookingContent
+            }
           >
             <Text
-              style={styles.bookingTitle}
+              style={
+                styles.bookingTitle
+              }
             >
               Bookings
             </Text>
 
+
             <Text
-              style={styles.bookingSubtitle}
+              style={
+                styles.bookingSubtitle
+              }
             >
               {isVerified
                 ? "View your assigned and active bookings"
@@ -1113,16 +1508,24 @@ export default function MaidHome() {
             </Text>
           </View>
 
-          <Text style={styles.arrow}>
+
+          <Text
+            style={styles.arrow}
+          >
             ›
           </Text>
 
+
           {!isVerified && (
             <View
-              style={styles.lockBadge}
+              style={
+                styles.lockBadge
+              }
             >
               <Text
-                style={styles.lockText}
+                style={
+                  styles.lockText
+                }
               >
                 🔒
               </Text>
@@ -1130,41 +1533,61 @@ export default function MaidHome() {
           )}
         </Pressable>
 
-        {/* Quick Actions */}
+
+        {/* ==================================================
+            QUICK ACTIONS
+        ================================================== */}
 
         <View
-          style={styles.sectionHeader}
+          style={
+            styles.sectionHeader
+          }
         >
           <Text
-            style={styles.sectionTitle}
+            style={
+              styles.sectionTitle
+            }
           >
             Quick Actions
           </Text>
         </View>
 
+
         <View
-          style={styles.quickActions}
+          style={
+            styles.quickActions
+          }
         >
           <Pressable
-            style={styles.quickCard}
+            style={
+              styles.quickCard
+            }
             onPress={
               handleServicesPress
             }
           >
             <Text
-              style={styles.quickIcon}
+              style={
+                styles.quickIcon
+              }
             >
               🧹
             </Text>
 
+
             <Text
-              style={styles.quickTitle}
+              style={
+                styles.quickTitle
+              }
             >
               My Services
             </Text>
 
+
             <Text
-              style={styles.quickSubtitle}
+              style={
+                styles.quickSubtitle
+              }
             >
               {maid?.serviceCategories
                 ?.length || 0}{" "}
@@ -1172,62 +1595,93 @@ export default function MaidHome() {
             </Text>
           </Pressable>
 
+
           <Pressable
-            style={styles.quickCard}
+            style={
+              styles.quickCard
+            }
             onPress={
               handleHistoryPress
             }
           >
             <Text
-              style={styles.quickIcon}
+              style={
+                styles.quickIcon
+              }
             >
               📜
             </Text>
 
+
             <Text
-              style={styles.quickTitle}
+              style={
+                styles.quickTitle
+              }
             >
               Job History
             </Text>
 
+
             <Text
-              style={styles.quickSubtitle}
+              style={
+                styles.quickSubtitle
+              }
             >
               View completed jobs
             </Text>
           </Pressable>
         </View>
 
-        {/* Service Area */}
+
+        {/* ==================================================
+            SERVICE AREA
+        ================================================== */}
 
         <View
-          style={styles.sectionHeader}
+          style={
+            styles.sectionHeader
+          }
         >
           <Text
-            style={styles.sectionTitle}
+            style={
+              styles.sectionTitle
+            }
           >
             Service Area
           </Text>
         </View>
 
-        <View style={styles.areaCard}>
+
+        <View
+          style={styles.areaCard}
+        >
           <Text
-            style={styles.locationIcon}
+            style={
+              styles.locationIcon
+            }
           >
             📍
           </Text>
 
+
           <View
-            style={styles.areaContent}
+            style={
+              styles.areaContent
+            }
           >
             <Text
-              style={styles.areaTitle}
+              style={
+                styles.areaTitle
+              }
             >
               Current Service Area
             </Text>
 
+
             <Text
-              style={styles.areaText}
+              style={
+                styles.areaText
+              }
             >
               {maid?.serviceArea ||
                 "Not set"}
@@ -1235,10 +1689,15 @@ export default function MaidHome() {
           </View>
         </View>
 
-        {/* Profile */}
+
+        {/* ==================================================
+            PROFILE
+        ================================================== */}
 
         <Pressable
-          style={styles.profileCard}
+          style={
+            styles.profileCard
+          }
           onPress={
             handleProfilePress
           }
@@ -1257,6 +1716,7 @@ export default function MaidHome() {
             </Text>
           </View>
 
+
           <View
             style={
               styles.profileCardContent
@@ -1270,40 +1730,134 @@ export default function MaidHome() {
               My Profile
             </Text>
 
+
             <Text
               style={
                 styles.profileCardSubtitle
               }
             >
-              View and update your profile
-              information
+              View and update your
+              profile information
             </Text>
           </View>
 
-          <Text style={styles.arrow}>
+
+          <Text
+            style={styles.arrow}
+          >
             ›
           </Text>
         </Pressable>
+
       </ScrollView>
 
-      {/* Bottom Navigation */}
 
-      <View style={styles.bottomNav}>
+      {/* ====================================================
+          IN-APP NOTIFICATIONS
+      ==================================================== */}
+
+      <Modal
+        visible={showNotifications}
+        transparent
+        animationType="slide"
+        onRequestClose={() =>
+          setShowNotifications(false)
+        }
+      >
+        <View style={styles.notificationOverlay}>
+          <View style={styles.notificationSheet}>
+            <View style={styles.notificationHeader}>
+              <Text style={styles.notificationTitle}>
+                Notifications
+              </Text>
+
+              <Pressable
+                onPress={() =>
+                  setShowNotifications(false)
+                }
+                style={styles.notificationCloseButton}
+              >
+                <Text style={styles.notificationCloseText}>
+                  ✕
+                </Text>
+              </Pressable>
+            </View>
+
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={
+                styles.notificationList
+              }
+            >
+              {notifications.length === 0 ? (
+                <View style={styles.emptyNotificationState}>
+                  <Text style={styles.emptyNotificationIcon}>
+                    🔔
+                  </Text>
+                  <Text style={styles.emptyNotificationTitle}>
+                    No notifications
+                  </Text>
+                  <Text style={styles.emptyNotificationText}>
+                    You will see booking updates here.
+                  </Text>
+                </View>
+              ) : (
+                notifications.map((notification) => (
+                  <View
+                    key={notification.id}
+                    style={[
+                      styles.notificationCard,
+                      !notification.isRead &&
+                        styles.unreadNotificationCard,
+                    ]}
+                  >
+                    <View style={styles.notificationDot} />
+
+                    <View style={styles.notificationContent}>
+                      <Text style={styles.notificationCardTitle}>
+                        {notification.title}
+                      </Text>
+                      <Text style={styles.notificationCardBody}>
+                        {notification.body}
+                      </Text>
+                    </View>
+                  </View>
+                ))
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+
+      {/* ====================================================
+          BOTTOM NAVIGATION
+      ==================================================== */}
+
+      <View
+        style={styles.bottomNav}
+      >
         <Pressable
           style={styles.navItem}
         >
           <Text
-            style={styles.navIconActive}
+            style={
+              styles.navIconActive
+            }
           >
             ⌂
           </Text>
 
+
           <Text
-            style={styles.navTextActive}
+            style={
+              styles.navTextActive
+            }
           >
             Home
           </Text>
         </Pressable>
+
 
         <Pressable
           style={styles.navItem}
@@ -1311,14 +1865,20 @@ export default function MaidHome() {
             handleBookingPress
           }
         >
-          <Text style={styles.navIcon}>
+          <Text
+            style={styles.navIcon}
+          >
             📋
           </Text>
 
-          <Text style={styles.navText}>
+
+          <Text
+            style={styles.navText}
+          >
             Bookings
           </Text>
         </Pressable>
+
 
         <Pressable
           style={styles.navItem}
@@ -1326,11 +1886,16 @@ export default function MaidHome() {
             handleProfilePress
           }
         >
-          <Text style={styles.navIcon}>
+          <Text
+            style={styles.navIcon}
+          >
             👤
           </Text>
 
-          <Text style={styles.navText}>
+
+          <Text
+            style={styles.navText}
+          >
             Profile
           </Text>
         </Pressable>
@@ -1339,15 +1904,22 @@ export default function MaidHome() {
   );
 }
 
-/* --------------------------------------------------
-   Styles
--------------------------------------------------- */
+
+// ============================================================
+// STYLES
+// ============================================================
 
 const styles = StyleSheet.create({
+
+  // ----------------------------------------------------------
+  // MAIN
+  // ----------------------------------------------------------
+
   container: {
     flex: 1,
     backgroundColor: "#F7F8FA",
   },
+
 
   loadingContainer: {
     flex: 1,
@@ -1356,19 +1928,32 @@ const styles = StyleSheet.create({
     backgroundColor: "#F7F8FA",
   },
 
+
   loadingText: {
     marginTop: 12,
     fontSize: 14,
     color: "#6B7280",
   },
 
+
+  // ----------------------------------------------------------
+  // SCROLL CONTENT
+  // ----------------------------------------------------------
+
   scrollContent: {
     paddingHorizontal: 20,
-    paddingTop: 16,
-    paddingBottom: 125,
+
+    // Safe space below Android status bar
+    paddingTop: 20,
+
+    // Enough space above bottom navigation
+    paddingBottom: 140,
   },
 
-  /* Header */
+
+  // ----------------------------------------------------------
+  // HEADER
+  // ----------------------------------------------------------
 
   header: {
     flexDirection: "row",
@@ -1377,17 +1962,169 @@ const styles = StyleSheet.create({
     marginBottom: 22,
   },
 
+  headerActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+
+  notificationButton: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: "#FFFFFF",
+    alignItems: "center",
+    justifyContent: "center",
+    position: "relative",
+  },
+
+  notificationIcon: {
+    fontSize: 22,
+  },
+
+  notificationBadge: {
+    position: "absolute",
+    top: 4,
+    right: 4,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: "#EF4444",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 4,
+  },
+
+  notificationBadgeText: {
+    color: "#FFFFFF",
+    fontSize: 10,
+    fontWeight: "700",
+  },
+
+  notificationOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.35)",
+    justifyContent: "flex-end",
+  },
+
+  notificationSheet: {
+    backgroundColor: "#F7F8FA",
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    maxHeight: "78%",
+    paddingTop: 20,
+    paddingHorizontal: 20,
+    paddingBottom: 28,
+  },
+
+  notificationHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 16,
+  },
+
+  notificationTitle: {
+    fontSize: 22,
+    fontWeight: "700",
+    color: "#111827",
+  },
+
+  notificationCloseButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: "#FFFFFF",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  notificationCloseText: {
+    fontSize: 18,
+    color: "#374151",
+  },
+
+  notificationList: {
+    paddingBottom: 10,
+  },
+
+  notificationCard: {
+    flexDirection: "row",
+    backgroundColor: "#FFFFFF",
+    borderRadius: 16,
+    padding: 15,
+    marginBottom: 10,
+  },
+
+  unreadNotificationCard: {
+    borderWidth: 1,
+    borderColor: "#D9EAFE",
+  },
+
+  notificationDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: "#208AEF",
+    marginTop: 6,
+    marginRight: 12,
+  },
+
+  notificationContent: {
+    flex: 1,
+  },
+
+  notificationCardTitle: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: "#111827",
+    marginBottom: 4,
+  },
+
+  notificationCardBody: {
+    fontSize: 14,
+    lineHeight: 20,
+    color: "#6B7280",
+  },
+
+  emptyNotificationState: {
+    alignItems: "center",
+    paddingVertical: 50,
+    paddingHorizontal: 20,
+  },
+
+  emptyNotificationIcon: {
+    fontSize: 40,
+    marginBottom: 12,
+  },
+
+  emptyNotificationTitle: {
+    fontSize: 17,
+    fontWeight: "700",
+    color: "#111827",
+    marginBottom: 5,
+  },
+
+  emptyNotificationText: {
+    fontSize: 14,
+    color: "#6B7280",
+    textAlign: "center",
+  },
+
+
   smallTitle: {
     fontSize: 14,
     color: "#6B7280",
     marginBottom: 4,
   },
 
+
   name: {
     fontSize: 28,
     fontWeight: "700",
     color: "#111827",
   },
+
 
   profileButton: {
     width: 48,
@@ -1399,11 +2136,15 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
 
+
   profileIcon: {
     fontSize: 21,
   },
 
-  /* Verification */
+
+  // ----------------------------------------------------------
+  // VERIFICATION
+  // ----------------------------------------------------------
 
   warningCard: {
     flexDirection: "row",
@@ -1413,6 +2154,7 @@ const styles = StyleSheet.create({
     marginBottom: 22,
   },
 
+
   rejectedCard: {
     flexDirection: "row",
     padding: 16,
@@ -1420,6 +2162,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#FDECEC",
     marginBottom: 22,
   },
+
 
   warningIconContainer: {
     width: 34,
@@ -1431,6 +2174,7 @@ const styles = StyleSheet.create({
     marginRight: 12,
   },
 
+
   rejectedIconContainer: {
     width: 34,
     height: 34,
@@ -1441,11 +2185,13 @@ const styles = StyleSheet.create({
     marginRight: 12,
   },
 
+
   warningIcon: {
     color: "#FFFFFF",
     fontSize: 18,
     fontWeight: "700",
   },
+
 
   rejectedIcon: {
     color: "#FFFFFF",
@@ -1453,9 +2199,11 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
 
+
   warningContent: {
     flex: 1,
   },
+
 
   warningTitle: {
     fontSize: 16,
@@ -1464,6 +2212,7 @@ const styles = StyleSheet.create({
     marginBottom: 5,
   },
 
+
   rejectedTitle: {
     fontSize: 16,
     fontWeight: "700",
@@ -1471,11 +2220,13 @@ const styles = StyleSheet.create({
     marginBottom: 5,
   },
 
+
   warningText: {
     fontSize: 13,
     lineHeight: 19,
     color: "#6B7280",
   },
+
 
   viewVerificationButton: {
     alignSelf: "flex-start",
@@ -1486,11 +2237,13 @@ const styles = StyleSheet.create({
     backgroundColor: "#FFFFFF",
   },
 
+
   viewVerificationText: {
     fontSize: 13,
     fontWeight: "600",
     color: "#111827",
   },
+
 
   verifiedCard: {
     flexDirection: "row",
@@ -1499,6 +2252,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#ECFDF3",
     marginBottom: 22,
   },
+
 
   verifiedIconContainer: {
     width: 34,
@@ -1510,15 +2264,18 @@ const styles = StyleSheet.create({
     marginRight: 12,
   },
 
+
   verifiedIcon: {
     color: "#FFFFFF",
     fontSize: 18,
     fontWeight: "700",
   },
 
+
   verifiedContent: {
     flex: 1,
   },
+
 
   verifiedTitle: {
     fontSize: 16,
@@ -1527,13 +2284,17 @@ const styles = StyleSheet.create({
     marginBottom: 5,
   },
 
+
   verifiedText: {
     fontSize: 13,
     lineHeight: 19,
     color: "#4B5563",
   },
 
-  /* Sections */
+
+  // ----------------------------------------------------------
+  // SECTIONS
+  // ----------------------------------------------------------
 
   sectionHeader: {
     flexDirection: "row",
@@ -1543,26 +2304,33 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
 
+
   sectionTitle: {
     fontSize: 18,
     fontWeight: "700",
     color: "#111827",
   },
 
+
   availabilityStatus: {
     fontSize: 13,
     fontWeight: "600",
   },
 
+
   availableText: {
     color: "#16A34A",
   },
+
 
   unavailableText: {
     color: "#6B7280",
   },
 
-  /* Availability */
+
+  // ----------------------------------------------------------
+  // AVAILABILITY
+  // ----------------------------------------------------------
 
   availabilityCard: {
     backgroundColor: "#FFFFFF",
@@ -1575,16 +2343,19 @@ const styles = StyleSheet.create({
     elevation: 1,
   },
 
+
   availabilityCardActive: {
     borderWidth: 1,
     borderColor: "#86EFAC",
   },
+
 
   availabilityLeft: {
     flexDirection: "row",
     alignItems: "center",
     flex: 1,
   },
+
 
   statusDot: {
     width: 12,
@@ -1593,13 +2364,16 @@ const styles = StyleSheet.create({
     marginRight: 12,
   },
 
+
   statusDotActive: {
     backgroundColor: "#16A34A",
   },
 
+
   statusDotInactive: {
     backgroundColor: "#9CA3AF",
   },
+
 
   availabilityTitle: {
     fontSize: 15,
@@ -1608,11 +2382,13 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
 
+
   availabilitySubtitle: {
     fontSize: 12,
     color: "#6B7280",
     maxWidth: 220,
   },
+
 
   toggle: {
     width: 50,
@@ -1623,9 +2399,11 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
 
+
   toggleActive: {
     backgroundColor: "#22C55E",
   },
+
 
   toggleCircle: {
     width: 24,
@@ -1634,11 +2412,15 @@ const styles = StyleSheet.create({
     backgroundColor: "#FFFFFF",
   },
 
+
   toggleCircleActive: {
     alignSelf: "flex-end",
   },
 
-  /* Upcoming Availability */
+
+  // ----------------------------------------------------------
+  // UPCOMING AVAILABILITY
+  // ----------------------------------------------------------
 
   upcomingAvailabilityCard: {
     backgroundColor: "#FFFFFF",
@@ -1650,6 +2432,7 @@ const styles = StyleSheet.create({
     elevation: 1,
   },
 
+
   upcomingIconContainer: {
     width: 46,
     height: 46,
@@ -1660,13 +2443,16 @@ const styles = StyleSheet.create({
     marginRight: 12,
   },
 
+
   upcomingIcon: {
     fontSize: 22,
   },
 
+
   upcomingContent: {
     flex: 1,
   },
+
 
   upcomingTitle: {
     fontSize: 15,
@@ -1675,6 +2461,7 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
 
+
   upcomingSubtitle: {
     fontSize: 12,
     lineHeight: 17,
@@ -1682,7 +2469,10 @@ const styles = StyleSheet.create({
     paddingRight: 8,
   },
 
-  /* Bookings */
+
+  // ----------------------------------------------------------
+  // BOOKINGS
+  // ----------------------------------------------------------
 
   bookingCard: {
     position: "relative",
@@ -1695,9 +2485,11 @@ const styles = StyleSheet.create({
     elevation: 1,
   },
 
+
   bookingCardLocked: {
     backgroundColor: "#F9FAFB",
   },
+
 
   bookingIconContainer: {
     width: 46,
@@ -1709,13 +2501,16 @@ const styles = StyleSheet.create({
     marginRight: 12,
   },
 
+
   bookingIcon: {
     fontSize: 21,
   },
 
+
   bookingContent: {
     flex: 1,
   },
+
 
   bookingTitle: {
     fontSize: 15,
@@ -1724,6 +2519,7 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
 
+
   bookingSubtitle: {
     fontSize: 12,
     lineHeight: 17,
@@ -1731,10 +2527,12 @@ const styles = StyleSheet.create({
     paddingRight: 8,
   },
 
+
   arrow: {
     fontSize: 28,
     color: "#9CA3AF",
   },
+
 
   lockBadge: {
     position: "absolute",
@@ -1742,17 +2540,22 @@ const styles = StyleSheet.create({
     top: 10,
   },
 
+
   lockText: {
     fontSize: 13,
   },
 
-  /* Quick Actions */
+
+  // ----------------------------------------------------------
+  // QUICK ACTIONS
+  // ----------------------------------------------------------
 
   quickActions: {
     flexDirection: "row",
     gap: 12,
     marginBottom: 22,
   },
+
 
   quickCard: {
     flex: 1,
@@ -1763,10 +2566,12 @@ const styles = StyleSheet.create({
     elevation: 1,
   },
 
+
   quickIcon: {
     fontSize: 25,
     marginBottom: 12,
   },
+
 
   quickTitle: {
     fontSize: 15,
@@ -1775,13 +2580,17 @@ const styles = StyleSheet.create({
     marginBottom: 5,
   },
 
+
   quickSubtitle: {
     fontSize: 12,
     lineHeight: 17,
     color: "#6B7280",
   },
 
-  /* Service Area */
+
+  // ----------------------------------------------------------
+  // SERVICE AREA
+  // ----------------------------------------------------------
 
   areaCard: {
     flexDirection: "row",
@@ -1793,14 +2602,17 @@ const styles = StyleSheet.create({
     elevation: 1,
   },
 
+
   locationIcon: {
     fontSize: 25,
     marginRight: 12,
   },
 
+
   areaContent: {
     flex: 1,
   },
+
 
   areaTitle: {
     fontSize: 14,
@@ -1809,12 +2621,16 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
 
+
   areaText: {
     fontSize: 12,
     color: "#6B7280",
   },
 
-  /* Profile */
+
+  // ----------------------------------------------------------
+  // PROFILE
+  // ----------------------------------------------------------
 
   profileCard: {
     flexDirection: "row",
@@ -1824,6 +2640,7 @@ const styles = StyleSheet.create({
     padding: 16,
     elevation: 1,
   },
+
 
   profileCardIcon: {
     width: 46,
@@ -1835,13 +2652,16 @@ const styles = StyleSheet.create({
     marginRight: 12,
   },
 
+
   profileCardEmoji: {
     fontSize: 21,
   },
 
+
   profileCardContent: {
     flex: 1,
   },
+
 
   profileCardTitle: {
     fontSize: 15,
@@ -1850,29 +2670,43 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
 
+
   profileCardSubtitle: {
     fontSize: 12,
     color: "#6B7280",
   },
 
-  /* Bottom Navigation */
+
+  // ----------------------------------------------------------
+  // BOTTOM NAVIGATION
+  // ----------------------------------------------------------
 
   bottomNav: {
     position: "absolute",
+
     left: 0,
     right: 0,
     bottom: 0,
-    minHeight: 78,
+
+    minHeight: 88,
+
     backgroundColor: "#FFFFFF",
+
     borderTopWidth: 1,
     borderTopColor: "#E5E7EB",
+
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-around",
+
     paddingTop: 8,
-    paddingBottom: 12,
+
+    // Android navigation bar safe space
+    paddingBottom: 20,
+
     elevation: 12,
   },
+
 
   navItem: {
     alignItems: "center",
@@ -1880,15 +2714,18 @@ const styles = StyleSheet.create({
     minWidth: 80,
   },
 
+
   navIconActive: {
     fontSize: 22,
     marginBottom: 4,
   },
 
+
   navIcon: {
     fontSize: 20,
     marginBottom: 4,
   },
+
 
   navTextActive: {
     fontSize: 11,
@@ -1896,8 +2733,10 @@ const styles = StyleSheet.create({
     color: "#111827",
   },
 
+
   navText: {
     fontSize: 11,
     color: "#6B7280",
   },
+
 });
