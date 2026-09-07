@@ -24,7 +24,6 @@ export default function BookingRequestScreen() {
   const { bookingId } = useLocalSearchParams<{ bookingId: string }>();
 
   const [booking, setBooking] = useState<any>(null);
-  const [customer, setCustomer] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [responding, setResponding] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState(180);
@@ -34,9 +33,7 @@ export default function BookingRequestScreen() {
 
     const loadBooking = async () => {
       try {
-        const bookingSnap = await getDoc(
-          doc(db, "bookings", bookingId)
-        );
+        const bookingSnap = await getDoc(doc(db, "bookings", bookingId));
 
         if (!bookingSnap.exists()) {
           Alert.alert("Error", "Booking not found.");
@@ -47,16 +44,6 @@ export default function BookingRequestScreen() {
         const data = bookingSnap.data();
 
         setBooking(data);
-
-        if (data?.customerId) {
-          const customerSnap = await getDoc(
-            doc(db, "users", data.customerId)
-          );
-
-          if (customerSnap.exists()) {
-            setCustomer(customerSnap.data());
-          }
-        }
       } catch (error) {
         console.log("Booking request error:", error);
         Alert.alert("Error", "Unable to load booking.");
@@ -88,9 +75,7 @@ export default function BookingRequestScreen() {
     const minutes = Math.floor(seconds / 60);
     const remainingSeconds = seconds % 60;
 
-    return `${minutes}:${remainingSeconds
-      .toString()
-      .padStart(2, "0")}`;
+    return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
   };
 
   const formatBookingTime = () => {
@@ -108,38 +93,35 @@ export default function BookingRequestScreen() {
   };
 
   const handleAccept = async () => {
-    if (!bookingId || responding) return;
+  if (!bookingId || responding) return;
 
-    try {
-      setResponding(true);
+  try {
+    setResponding(true);
 
-      await updateDoc(doc(db, "bookings", bookingId), {
-        status: "confirmed",
-        maidResponse: "accepted",
-        respondedAt: new Date(),
-      });
+    await updateDoc(doc(db, "bookings", bookingId), {
+      status: "confirmed",
+      maidResponse: "accepted",
+      respondedAt: new Date(),
+    });
 
-      Alert.alert(
-        "Booking Accepted",
-        "You have accepted this booking.",
-        [
-          {
-            text: "OK",
-            onPress: () => router.replace("/maid"),
-          },
-        ]
-      );
-    } catch (error) {
-      console.log("Accept error:", error);
+    // Directly open Active Booking
+    router.replace({
+      pathname: "/maid/active-booking",
+      params: {
+        bookingId: bookingId,
+      },
+    });
+  } catch (error) {
+    console.log("Accept error:", error);
 
-      setResponding(false);
+    setResponding(false);
 
-      Alert.alert(
-        "Error",
-        "Could not accept this booking. Please try again."
-      );
-    }
-  };
+    Alert.alert(
+      "Error",
+      "Could not accept this booking. Please try again."
+    );
+  }
+};
 
   const handleReject = async (isTimeout = false) => {
     if (!bookingId || responding) return;
@@ -164,17 +146,14 @@ export default function BookingRequestScreen() {
             text: "OK",
             onPress: () => router.replace("/maid"),
           },
-        ]
+        ],
       );
     } catch (error) {
       console.log("Reject error:", error);
 
       setResponding(false);
 
-      Alert.alert(
-        "Error",
-        "Could not reject this booking. Please try again."
-      );
+      Alert.alert("Error", "Could not reject this booking. Please try again.");
     }
   };
 
@@ -182,9 +161,7 @@ export default function BookingRequestScreen() {
     return (
       <View style={styles.center}>
         <ActivityIndicator size="large" />
-        <Text style={styles.loadingText}>
-          Loading booking request...
-        </Text>
+        <Text style={styles.loadingText}>Loading booking request...</Text>
       </View>
     );
   }
@@ -206,9 +183,7 @@ export default function BookingRequestScreen() {
 
           <View style={styles.timer}>
             <Text style={styles.timerLabel}>Respond within</Text>
-            <Text style={styles.timerValue}>
-              {formatTime(secondsLeft)}
-            </Text>
+            <Text style={styles.timerValue}>{formatTime(secondsLeft)}</Text>
           </View>
         </View>
 
@@ -216,9 +191,7 @@ export default function BookingRequestScreen() {
           <Text style={styles.sectionLabel}>CUSTOMER</Text>
 
           <Text style={styles.customerName}>
-            {booking.customerName ||
-              customer?.name ||
-              "Customer"}
+            {booking.customerName || "Customer"}
           </Text>
 
           <Text style={styles.address}>
@@ -238,9 +211,7 @@ export default function BookingRequestScreen() {
 
           <View style={styles.row}>
             <Text style={styles.label}>Date & Time</Text>
-            <Text style={styles.value}>
-              {formatBookingTime()}
-            </Text>
+            <Text style={styles.value}>{formatBookingTime()}</Text>
           </View>
 
           <View style={styles.row}>
@@ -253,69 +224,47 @@ export default function BookingRequestScreen() {
 
           <View style={styles.row}>
             <Text style={styles.label}>Distance</Text>
-            <Text style={styles.value}>
-              Not available yet
-            </Text>
+            <Text style={styles.value}>Not available yet</Text>
           </View>
         </View>
 
         <View style={styles.card}>
-          <Text style={styles.sectionLabel}>
-            REQUESTED SERVICES
-          </Text>
+          <Text style={styles.sectionLabel}>REQUESTED SERVICES</Text>
 
           {categories.map((category: string, index: number) => (
             <View key={`${category}-${index}`} style={styles.category}>
-              <Text style={styles.categoryText}>
-                {category}
-              </Text>
+              <Text style={styles.categoryText}>{category}</Text>
             </View>
           ))}
         </View>
 
         <View style={styles.earningCard}>
-          <Text style={styles.earningLabel}>
-            YOUR EARNING
-          </Text>
+          <Text style={styles.earningLabel}>YOUR EARNING</Text>
 
-          <Text style={styles.earningAmount}>
-            ₹{booking.totalPrice || 0}
-          </Text>
+          <Text style={styles.earningAmount}>₹{booking.totalPrice || 0}</Text>
 
-          <Text style={styles.earningNote}>
-            Earnings for this booking
-          </Text>
+          <Text style={styles.earningNote}>Earnings for this booking</Text>
         </View>
 
         <View style={styles.actions}>
           <Pressable
-            style={[
-              styles.acceptButton,
-              responding && styles.disabledButton,
-            ]}
+            style={[styles.acceptButton, responding && styles.disabledButton]}
             disabled={responding}
             onPress={handleAccept}
           >
             {responding ? (
               <ActivityIndicator color="#fff" />
             ) : (
-              <Text style={styles.acceptText}>
-                Accept Booking
-              </Text>
+              <Text style={styles.acceptText}>Accept Booking</Text>
             )}
           </Pressable>
 
           <Pressable
-            style={[
-              styles.rejectButton,
-              responding && styles.disabledButton,
-            ]}
+            style={[styles.rejectButton, responding && styles.disabledButton]}
             disabled={responding}
             onPress={() => handleReject(false)}
           >
-            <Text style={styles.rejectText}>
-              Reject
-            </Text>
+            <Text style={styles.rejectText}>Reject</Text>
           </Pressable>
         </View>
       </ScrollView>

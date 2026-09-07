@@ -13,9 +13,13 @@ import { Href, router } from "expo-router";
 
 import { getAuth } from "@react-native-firebase/auth";
 import {
+  collection,
   doc,
   getDoc,
   getFirestore,
+  onSnapshot,
+  query,
+  where,
 } from "@react-native-firebase/firestore";
 
 const auth = getAuth();
@@ -34,16 +38,103 @@ type CustomerData = {
   };
 };
 
+type ActiveBooking = {
+  id: string;
+  customerId?: string;
+  maidId?: string | null;
+  categories?: string[];
+  duration?: number;
+  totalPrice?: number;
+  status?: string;
+  scheduledDateTime?: any;
+  customerName?: string;
+};
+
 export default function CustomerHome() {
-  const [customer, setCustomer] = useState<CustomerData | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [customer, setCustomer] =
+    useState<CustomerData | null>(null);
+
+  const [activeBooking, setActiveBooking] =
+    useState<ActiveBooking | null>(null);
+
+  const [loading, setLoading] =
+    useState(true);
 
   useEffect(() => {
     loadCustomerProfile();
   }, []);
 
+  useEffect(() => {
+    const user = auth.currentUser;
+
+    if (!user) {
+      return;
+    }
+
+    const bookingsQuery = query(
+      collection(db, "bookings"),
+      where("customerId", "==", user.uid)
+    );
+
+    const unsubscribe = onSnapshot(
+      bookingsQuery,
+      (snapshot) => {
+        const activeStatuses = [
+          "pending",
+          "assigned",
+          "confirmed",
+          "in_progress",
+        ];
+
+        const loadedBookings: ActiveBooking[] =
+          snapshot.docs.map((bookingDoc) => ({
+            id: bookingDoc.id,
+            ...(bookingDoc.data() as Omit<
+              ActiveBooking,
+              "id"
+            >),
+          }));
+
+        const activeBookings =
+          loadedBookings
+            .filter((booking) =>
+              activeStatuses.includes(
+                booking.status || ""
+              )
+            )
+            .sort((a, b) => {
+              const aTime =
+                a.scheduledDateTime
+                  ?.toDate?.()
+                  ?.getTime?.() || 0;
+
+              const bTime =
+                b.scheduledDateTime
+                  ?.toDate?.()
+                  ?.getTime?.() || 0;
+
+              return aTime - bTime;
+            });
+
+        setActiveBooking(
+          activeBookings[0] || null
+        );
+      },
+      (error) => {
+        console.error(
+          "ACTIVE BOOKING LISTENER ERROR:",
+          error
+        );
+      }
+    );
+
+    return unsubscribe;
+  }, []);
+
   const loadCustomerProfile = async () => {
     try {
+      setLoading(true);
+
       const user = auth.currentUser;
 
       if (!user) {
@@ -51,8 +142,14 @@ export default function CustomerHome() {
         return;
       }
 
-      const customerRef = doc(db, "users", user.uid);
-      const customerSnapshot = await getDoc(customerRef);
+      const customerRef = doc(
+        db,
+        "users",
+        user.uid
+      );
+
+      const customerSnapshot =
+        await getDoc(customerRef);
 
       if (!customerSnapshot.exists()) {
         router.replace({
@@ -61,12 +158,18 @@ export default function CustomerHome() {
             phone: user.phoneNumber || "",
           },
         });
+
         return;
       }
 
-      setCustomer(customerSnapshot.data() as CustomerData);
+      setCustomer(
+        customerSnapshot.data() as CustomerData
+      );
     } catch (error) {
-      console.error("CUSTOMER HOME ERROR:", error);
+      console.error(
+        "CUSTOMER HOME ERROR:",
+        error
+      );
 
       Alert.alert(
         "Something went wrong",
@@ -89,9 +192,24 @@ export default function CustomerHome() {
     router.push("/customer/profile");
   };
 
+  const handleActiveBookingStatus = () => {
+    if (!activeBooking) {
+      return;
+    }
+
+    router.push({
+      pathname: "/customer/waiting",
+      params: {
+        bookingId: activeBooking.id,
+      },
+    });
+  };
+
   if (loading) {
     return (
-      <SafeAreaView style={styles.loadingContainer}>
+      <SafeAreaView
+        style={styles.loadingContainer}
+      >
         <ActivityIndicator size="large" />
 
         <Text style={styles.loadingText}>
@@ -123,7 +241,9 @@ export default function CustomerHome() {
             style={styles.profileButton}
             onPress={handleProfile}
           >
-            <Text style={styles.profileIcon}>👤</Text>
+            <Text style={styles.profileIcon}>
+              👤
+            </Text>
           </Pressable>
         </View>
 
@@ -133,7 +253,9 @@ export default function CustomerHome() {
           onPress={handleProfile}
         >
           <View style={styles.locationCircle}>
-            <Text style={styles.locationIcon}>📍</Text>
+            <Text style={styles.locationIcon}>
+              📍
+            </Text>
           </View>
 
           <View style={styles.addressContent}>
@@ -163,8 +285,8 @@ export default function CustomerHome() {
             </Text>
 
             <Text style={styles.heroSubtitle}>
-              Book a trusted helper for cleaning, cooking,
-              laundry and more.
+              Book a trusted helper for cleaning,
+              cooking, laundry and more.
             </Text>
 
             <Pressable
@@ -182,7 +304,9 @@ export default function CustomerHome() {
           </View>
 
           <View style={styles.heroIconContainer}>
-            <Text style={styles.heroIcon}>🏠</Text>
+            <Text style={styles.heroIcon}>
+              🏠
+            </Text>
           </View>
         </View>
 
@@ -199,23 +323,142 @@ export default function CustomerHome() {
           </Pressable>
         </View>
 
-        <View style={styles.emptyBookingCard}>
-          <View style={styles.emptyBookingIconContainer}>
-            <Text style={styles.emptyBookingIcon}>
-              📋
-            </Text>
-          </View>
+        {activeBooking ? (
+          <View style={styles.activeBookingCard}>
+            {/* Active Booking Header */}
+            <View style={styles.activeBookingTopRow}>
+              <View
+                style={
+                  styles.activeBookingIconContainer
+                }
+              >
+                <Text
+                  style={styles.activeBookingIcon}
+                >
+                  📋
+                </Text>
+              </View>
 
-          <View style={styles.emptyBookingContent}>
-            <Text style={styles.emptyBookingTitle}>
-              No active booking
-            </Text>
+              <View style={styles.activeBookingInfo}>
+                <Text
+                  style={styles.activeBookingTitle}
+                  numberOfLines={1}
+                >
+                  {activeBooking.categories?.length
+                    ? activeBooking.categories
+                        .map(
+                          (category) =>
+                            formatCategoryName(
+                              category
+                            )
+                        )
+                        .join(", ")
+                    : "Helper Service"}
+                </Text>
 
-            <Text style={styles.emptyBookingText}>
-              Your current bookings will appear here.
-            </Text>
+                <Text
+                  style={styles.activeBookingStatus}
+                >
+                  {getBookingStatusLabel(
+                    activeBooking.status
+                  )}
+                </Text>
+              </View>
+            </View>
+
+            {/* Booking Details */}
+            <View
+              style={styles.activeBookingDetails}
+            >
+              <View
+                style={styles.activeBookingDetail}
+              >
+                <Text
+                  style={
+                    styles.activeBookingDetailLabel
+                  }
+                >
+                  Duration
+                </Text>
+
+                <Text
+                  style={
+                    styles.activeBookingDetailValue
+                  }
+                >
+                  {activeBooking.duration || 0} hr
+                </Text>
+              </View>
+
+              <View
+                style={styles.activeBookingDivider}
+              />
+
+              <View
+                style={styles.activeBookingDetail}
+              >
+                <Text
+                  style={
+                    styles.activeBookingDetailLabel
+                  }
+                >
+                  Total
+                </Text>
+
+                <Text
+                  style={
+                    styles.activeBookingDetailValue
+                  }
+                >
+                  ₹{activeBooking.totalPrice || 0}
+                </Text>
+              </View>
+            </View>
+
+            {/* View Status */}
+            <Pressable
+              style={styles.activeBookingAction}
+              onPress={handleActiveBookingStatus}
+            >
+              <Text
+                style={
+                  styles.activeBookingActionText
+                }
+              >
+                View Status →
+              </Text>
+            </Pressable>
           </View>
-        </View>
+        ) : (
+          <View style={styles.emptyBookingCard}>
+            <View
+              style={
+                styles.emptyBookingIconContainer
+              }
+            >
+              <Text
+                style={styles.emptyBookingIcon}
+              >
+                📋
+              </Text>
+            </View>
+
+            <View style={styles.emptyBookingContent}>
+              <Text
+                style={styles.emptyBookingTitle}
+              >
+                No active booking
+              </Text>
+
+              <Text
+                style={styles.emptyBookingText}
+              >
+                Your current bookings will appear
+                here.
+              </Text>
+            </View>
+          </View>
+        )}
 
         {/* Popular Services */}
         <View style={styles.sectionHeader}>
@@ -231,12 +474,17 @@ export default function CustomerHome() {
         </View>
 
         <View style={styles.servicesRow}>
+          {/* Cleaning */}
           <Pressable
             style={styles.serviceCard}
             onPress={handleBookHelper}
           >
-            <View style={styles.serviceIconContainer}>
-              <Text style={styles.serviceIcon}>🧹</Text>
+            <View
+              style={styles.serviceIconContainer}
+            >
+              <Text style={styles.serviceIcon}>
+                🧹
+              </Text>
             </View>
 
             <Text style={styles.serviceTitle}>
@@ -248,12 +496,17 @@ export default function CustomerHome() {
             </Text>
           </Pressable>
 
+          {/* Cooking */}
           <Pressable
             style={styles.serviceCard}
             onPress={handleBookHelper}
           >
-            <View style={styles.serviceIconContainer}>
-              <Text style={styles.serviceIcon}>🍳</Text>
+            <View
+              style={styles.serviceIconContainer}
+            >
+              <Text style={styles.serviceIcon}>
+                🍳
+              </Text>
             </View>
 
             <Text style={styles.serviceTitle}>
@@ -265,12 +518,17 @@ export default function CustomerHome() {
             </Text>
           </Pressable>
 
+          {/* Laundry */}
           <Pressable
             style={styles.serviceCard}
             onPress={handleBookHelper}
           >
-            <View style={styles.serviceIconContainer}>
-              <Text style={styles.serviceIcon}>🧺</Text>
+            <View
+              style={styles.serviceIconContainer}
+            >
+              <Text style={styles.serviceIcon}>
+                🧺
+              </Text>
             </View>
 
             <Text style={styles.serviceTitle}>
@@ -297,8 +555,8 @@ export default function CustomerHome() {
             </Text>
 
             <Text style={styles.infoText}>
-              HouseHelp connects you with verified helpers
-              available in your area.
+              HouseHelp connects you with verified
+              helpers available in your area.
             </Text>
           </View>
         </View>
@@ -308,13 +566,20 @@ export default function CustomerHome() {
 
       {/* Bottom Navigation */}
       <View style={styles.bottomNav}>
-        <Pressable style={styles.navItem}>
-          <Text style={styles.navIconActive}>⌂</Text>
+        {/* Home */}
+        <Pressable
+          style={styles.navItem}
+        >
+          <Text style={styles.navIconActive}>
+            ⌂
+          </Text>
+
           <Text style={styles.navTextActive}>
             Home
           </Text>
         </Pressable>
 
+        {/* Bookings */}
         <Pressable
           style={styles.navItem}
           onPress={handleBookings}
@@ -328,6 +593,7 @@ export default function CustomerHome() {
           </Text>
         </Pressable>
 
+        {/* Profile */}
         <Pressable
           style={styles.navItem}
           onPress={handleProfile}
@@ -344,6 +610,38 @@ export default function CustomerHome() {
     </SafeAreaView>
   );
 }
+
+const formatCategoryName = (
+  category: string
+) => {
+  return category
+    .replace(/_/g, " ")
+    .replace(/\band\b/g, "&")
+    .replace(/\b\w/g, (letter) =>
+      letter.toUpperCase()
+    );
+};
+
+const getBookingStatusLabel = (
+  status?: string
+) => {
+  switch (status) {
+    case "pending":
+      return "Finding a helper";
+
+    case "assigned":
+      return "Helper assigned";
+
+    case "confirmed":
+      return "Booking confirmed";
+
+    case "in_progress":
+      return "Job in progress";
+
+    default:
+      return "Active booking";
+  }
+};
 
 const styles = StyleSheet.create({
   container: {
@@ -546,6 +844,96 @@ const styles = StyleSheet.create({
     color: "#374151",
   },
 
+  /* Active Booking */
+
+  activeBookingCard: {
+    backgroundColor: "#FFFFFF",
+    borderRadius: 18,
+    padding: 16,
+    marginBottom: 25,
+  },
+
+  activeBookingTopRow: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+
+  activeBookingIconContainer: {
+    width: 48,
+    height: 48,
+    borderRadius: 14,
+    backgroundColor: "#F3F4F6",
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 12,
+  },
+
+  activeBookingIcon: {
+    fontSize: 21,
+  },
+
+  activeBookingInfo: {
+    flex: 1,
+  },
+
+  activeBookingTitle: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: "#111827",
+  },
+
+  activeBookingStatus: {
+    marginTop: 4,
+    fontSize: 11,
+    color: "#6B7280",
+  },
+
+  activeBookingDetails: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 16,
+    paddingTop: 14,
+    borderTopWidth: 1,
+    borderTopColor: "#E5E7EB",
+  },
+
+  activeBookingDetail: {
+    flex: 1,
+  },
+
+  activeBookingDetailLabel: {
+    fontSize: 10,
+    color: "#9CA3AF",
+    marginBottom: 3,
+  },
+
+  activeBookingDetailValue: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: "#111827",
+  },
+
+  activeBookingDivider: {
+    width: 1,
+    height: 30,
+    backgroundColor: "#E5E7EB",
+    marginHorizontal: 15,
+  },
+
+  activeBookingAction: {
+    marginTop: 14,
+    backgroundColor: "#111827",
+    borderRadius: 11,
+    paddingVertical: 10,
+    alignItems: "center",
+  },
+
+  activeBookingActionText: {
+    color: "#FFFFFF",
+    fontSize: 11,
+    fontWeight: "700",
+  },
+
   emptyBookingCard: {
     flexDirection: "row",
     alignItems: "center",
@@ -585,6 +973,8 @@ const styles = StyleSheet.create({
     color: "#6B7280",
   },
 
+  /* Services */
+
   servicesRow: {
     flexDirection: "row",
     gap: 10,
@@ -623,6 +1013,8 @@ const styles = StyleSheet.create({
     fontSize: 10,
     color: "#9CA3AF",
   },
+
+  /* Info */
 
   infoCard: {
     flexDirection: "row",
@@ -664,6 +1056,8 @@ const styles = StyleSheet.create({
     lineHeight: 17,
     color: "#6B7280",
   },
+
+  /* Bottom Navigation */
 
   bottomNav: {
     position: "absolute",

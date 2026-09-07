@@ -24,6 +24,7 @@ import {
 
 type MaidData = {
   name?: string;
+  phoneNumber?: string;
   verificationStatus?: "pending" | "verified" | "rejected";
   serviceCategories?: string[];
   serviceArea?: string;
@@ -80,20 +81,18 @@ export default function MaidHome() {
 
         /*
          * Listen for bookings assigned to this maid.
-         *
-         * We intentionally query only by maidId and filter
-         * status locally, so we don't require a composite index.
          */
         const bookingsQuery = query(
           collection(db, "bookings"),
-          where("maidId", "==", user.uid)
+          where("maidId", "==", user.uid),
         );
 
         unsubscribeBookings = onSnapshot(
           bookingsQuery,
           (snapshot) => {
             const assignedBooking = snapshot.docs.find(
-              (bookingDoc) => bookingDoc.data()?.status === "assigned"
+              (bookingDoc) =>
+                bookingDoc.data()?.status === "assigned",
             );
 
             if (!assignedBooking) {
@@ -103,8 +102,7 @@ export default function MaidHome() {
             const bookingId = assignedBooking.id;
 
             /*
-             * Prevent the same booking from opening repeatedly
-             * when Firestore sends another snapshot update.
+             * Prevent the same booking from opening repeatedly.
              */
             if (openedBookingIdRef.current === bookingId) {
               return;
@@ -120,8 +118,11 @@ export default function MaidHome() {
             });
           },
           (error) => {
-            console.error("BOOKING LISTENER ERROR:", error);
-          }
+            console.error(
+              "BOOKING LISTENER ERROR:",
+              error,
+            );
+          },
         );
       } catch (error) {
         console.error("MAID HOME ERROR:", error);
@@ -130,7 +131,7 @@ export default function MaidHome() {
 
         Alert.alert(
           "Something went wrong",
-          "Unable to load your profile. Please try again."
+          "Unable to load your profile. Please try again.",
         );
       }
     };
@@ -142,9 +143,15 @@ export default function MaidHome() {
     };
   }, []);
 
-  const verificationStatus = maid?.verificationStatus ?? "pending";
-  const isVerified = verificationStatus === "verified";
+  const verificationStatus =
+    maid?.verificationStatus ?? "pending";
 
+  const isVerified =
+    verificationStatus === "verified";
+
+  /*
+   * Available Now ON/OFF
+   */
   const handleAvailabilityPress = async () => {
     if (!isVerified) {
       Alert.alert(
@@ -153,13 +160,14 @@ export default function MaidHome() {
         [
           {
             text: "View Verification",
-            onPress: () => router.push("/maid/profile"),
+            onPress: () =>
+              router.push("/maid/profile"),
           },
           {
             text: "OK",
             style: "cancel",
           },
-        ]
+        ],
       );
 
       return;
@@ -168,7 +176,11 @@ export default function MaidHome() {
     const user = auth.currentUser;
 
     if (!user) {
-      Alert.alert("Session Expired", "Please login again.");
+      Alert.alert(
+        "Session Expired",
+        "Please login again.",
+      );
+
       router.replace("/auth/login");
       return;
     }
@@ -179,29 +191,65 @@ export default function MaidHome() {
     setIsAvailable(newAvailability);
 
     try {
-      await updateDoc(doc(db, "maids", user.uid), {
-        isAvailableNow: newAvailability,
-      });
+      await updateDoc(
+        doc(db, "maids", user.uid),
+        {
+          isAvailableNow: newAvailability,
+        },
+      );
 
       console.log(
         "AVAILABILITY UPDATED:",
         user.uid,
         "isAvailableNow:",
-        newAvailability
+        newAvailability,
       );
     } catch (error) {
-      console.error("AVAILABILITY UPDATE ERROR:", error);
+      console.error(
+        "AVAILABILITY UPDATE ERROR:",
+        error,
+      );
 
-      // Roll back UI if Firestore update fails.
+      // Rollback UI if Firestore update fails.
       setIsAvailable(!newAvailability);
 
       Alert.alert(
         "Update Failed",
-        "Could not update your availability. Please try again."
+        "Could not update your availability. Please try again.",
       );
     }
   };
 
+  /*
+   * Upcoming Availability Calendar
+   */
+  const handleUpcomingAvailabilityPress = () => {
+    if (!isVerified) {
+      Alert.alert(
+        "Verification Required",
+        "You need to be verified before setting upcoming availability.",
+        [
+          {
+            text: "View Verification",
+            onPress: () =>
+              router.push("/maid/profile"),
+          },
+          {
+            text: "OK",
+            style: "cancel",
+          },
+        ],
+      );
+
+      return;
+    }
+
+    router.push("/maid/availability");
+  };
+
+  /*
+   * Booking list
+   */
   const handleBookingPress = () => {
     if (!isVerified) {
       Alert.alert(
@@ -210,22 +258,20 @@ export default function MaidHome() {
         [
           {
             text: "View Verification",
-            onPress: () => router.push("/maid/profile"),
+            onPress: () =>
+              router.push("/maid/profile"),
           },
           {
             text: "OK",
             style: "cancel",
           },
-        ]
+        ],
       );
 
       return;
     }
 
-    Alert.alert(
-      "Booking Requests",
-      "New booking requests will appear here automatically."
-    );
+    router.push("/maid/bookings");
   };
 
   const handleProfilePress = () => {
@@ -233,22 +279,21 @@ export default function MaidHome() {
   };
 
   const handleHistoryPress = () => {
-    Alert.alert(
-      "Coming Next",
-      "Job history screen will be connected next."
-    );
+    router.push("/maid/job-history");
   };
 
   const handleServicesPress = () => {
     Alert.alert(
       "Coming Next",
-      "Services screen will be connected next."
+      "Services screen will be connected next.",
     );
   };
 
   if (loading) {
     return (
-      <SafeAreaView style={styles.loadingContainer}>
+      <SafeAreaView
+        style={styles.loadingContainer}
+      >
         <ActivityIndicator size="large" />
 
         <Text style={styles.loadingText}>
@@ -261,7 +306,9 @@ export default function MaidHome() {
   return (
     <SafeAreaView style={styles.container}>
       <ScrollView
-        contentContainerStyle={styles.scrollContent}
+        contentContainerStyle={
+          styles.scrollContent
+        }
         showsVerticalScrollIndicator={false}
       >
         {/* Header */}
@@ -286,10 +333,14 @@ export default function MaidHome() {
           </Pressable>
         </View>
 
-        {/* Verification Banner */}
+        {/* Verification Pending */}
         {verificationStatus === "pending" && (
           <View style={styles.warningCard}>
-            <View style={styles.warningIconContainer}>
+            <View
+              style={
+                styles.warningIconContainer
+              }
+            >
               <Text style={styles.warningIcon}>
                 !
               </Text>
@@ -301,15 +352,23 @@ export default function MaidHome() {
               </Text>
 
               <Text style={styles.warningText}>
-                Your profile is under verification. You can explore the app,
-                but bookings will be available after verification.
+                Your profile is under verification.
+                You can explore the app, but
+                bookings will be available after
+                verification.
               </Text>
 
               <Pressable
-                style={styles.viewVerificationButton}
+                style={
+                  styles.viewVerificationButton
+                }
                 onPress={handleProfilePress}
               >
-                <Text style={styles.viewVerificationText}>
+                <Text
+                  style={
+                    styles.viewVerificationText
+                  }
+                >
                   View Verification
                 </Text>
               </Pressable>
@@ -317,10 +376,14 @@ export default function MaidHome() {
           </View>
         )}
 
-        {/* Rejected */}
+        {/* Verification Rejected */}
         {verificationStatus === "rejected" && (
           <View style={styles.rejectedCard}>
-            <View style={styles.rejectedIconContainer}>
+            <View
+              style={
+                styles.rejectedIconContainer
+              }
+            >
               <Text style={styles.rejectedIcon}>
                 !
               </Text>
@@ -332,15 +395,22 @@ export default function MaidHome() {
               </Text>
 
               <Text style={styles.warningText}>
-                Your verification needs attention. Open your profile to review
-                and update your details.
+                Your verification needs attention.
+                Open your profile to review and
+                update your details.
               </Text>
 
               <Pressable
-                style={styles.viewVerificationButton}
+                style={
+                  styles.viewVerificationButton
+                }
                 onPress={handleProfilePress}
               >
-                <Text style={styles.viewVerificationText}>
+                <Text
+                  style={
+                    styles.viewVerificationText
+                  }
+                >
                   Review Profile
                 </Text>
               </Pressable>
@@ -351,7 +421,11 @@ export default function MaidHome() {
         {/* Verified */}
         {verificationStatus === "verified" && (
           <View style={styles.verifiedCard}>
-            <View style={styles.verifiedIconContainer}>
+            <View
+              style={
+                styles.verifiedIconContainer
+              }
+            >
               <Text style={styles.verifiedIcon}>
                 ✓
               </Text>
@@ -363,7 +437,8 @@ export default function MaidHome() {
               </Text>
 
               <Text style={styles.verifiedText}>
-                Your account is ready to receive bookings.
+                Your account is ready to receive
+                bookings.
               </Text>
             </View>
           </View>
@@ -383,14 +458,18 @@ export default function MaidHome() {
                 : styles.unavailableText,
             ]}
           >
-            {isAvailable ? "Available" : "Offline"}
+            {isAvailable
+              ? "Available"
+              : "Offline"}
           </Text>
         </View>
 
+        {/* Available Now Toggle */}
         <Pressable
           style={[
             styles.availabilityCard,
-            isAvailable && styles.availabilityCardActive,
+            isAvailable &&
+              styles.availabilityCardActive,
           ]}
           onPress={handleAvailabilityPress}
         >
@@ -405,13 +484,19 @@ export default function MaidHome() {
             />
 
             <View>
-              <Text style={styles.availabilityTitle}>
+              <Text
+                style={styles.availabilityTitle}
+              >
                 {isAvailable
                   ? "You are available"
                   : "You're offline"}
               </Text>
 
-              <Text style={styles.availabilitySubtitle}>
+              <Text
+                style={
+                  styles.availabilitySubtitle
+                }
+              >
                 {isAvailable
                   ? "You can receive new booking requests"
                   : "Turn on availability to receive bookings"}
@@ -422,19 +507,64 @@ export default function MaidHome() {
           <View
             style={[
               styles.toggle,
-              isAvailable && styles.toggleActive,
+              isAvailable &&
+                styles.toggleActive,
             ]}
           >
             <View
               style={[
                 styles.toggleCircle,
-                isAvailable && styles.toggleCircleActive,
+                isAvailable &&
+                  styles.toggleCircleActive,
               ]}
             />
           </View>
         </Pressable>
 
-        {/* Booking Request */}
+        {/* Upcoming Availability */}
+        <Pressable
+          style={
+            styles.upcomingAvailabilityCard
+          }
+          onPress={
+            handleUpcomingAvailabilityPress
+          }
+        >
+          <View
+            style={
+              styles.upcomingIconContainer
+            }
+          >
+            <Text style={styles.upcomingIcon}>
+              📅
+            </Text>
+          </View>
+
+          <View
+            style={styles.upcomingContent}
+          >
+            <Text
+              style={styles.upcomingTitle}
+            >
+              Set Upcoming Availability
+            </Text>
+
+            <Text
+              style={
+                styles.upcomingSubtitle
+              }
+            >
+              Choose dates and time slots for
+              future bookings
+            </Text>
+          </View>
+
+          <Text style={styles.arrow}>
+            ›
+          </Text>
+        </Pressable>
+
+        {/* Bookings */}
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>
             Bookings
@@ -444,24 +574,33 @@ export default function MaidHome() {
         <Pressable
           style={[
             styles.bookingCard,
-            !isVerified && styles.bookingCardLocked,
+            !isVerified &&
+              styles.bookingCardLocked,
           ]}
           onPress={handleBookingPress}
         >
-          <View style={styles.bookingIconContainer}>
+          <View
+            style={
+              styles.bookingIconContainer
+            }
+          >
             <Text style={styles.bookingIcon}>
               📋
             </Text>
           </View>
 
-          <View style={styles.bookingContent}>
+          <View
+            style={styles.bookingContent}
+          >
             <Text style={styles.bookingTitle}>
-              Booking Requests
+              Bookings
             </Text>
 
-            <Text style={styles.bookingSubtitle}>
+            <Text
+              style={styles.bookingSubtitle}
+            >
               {isVerified
-                ? "Check new requests from customers"
+                ? "View your assigned and active bookings"
                 : "Verification required to receive bookings"}
             </Text>
           </View>
@@ -499,8 +638,12 @@ export default function MaidHome() {
               My Services
             </Text>
 
-            <Text style={styles.quickSubtitle}>
-              {maid?.serviceCategories?.length || 0} services
+            <Text
+              style={styles.quickSubtitle}
+            >
+              {maid?.serviceCategories
+                ?.length || 0}{" "}
+              services
             </Text>
           </Pressable>
 
@@ -516,7 +659,9 @@ export default function MaidHome() {
               Job History
             </Text>
 
-            <Text style={styles.quickSubtitle}>
+            <Text
+              style={styles.quickSubtitle}
+            >
               View completed jobs
             </Text>
           </Pressable>
@@ -550,19 +695,32 @@ export default function MaidHome() {
           style={styles.profileCard}
           onPress={handleProfilePress}
         >
-          <View style={styles.profileCardIcon}>
-            <Text style={styles.profileCardEmoji}>
+          <View
+            style={styles.profileCardIcon}
+          >
+            <Text
+              style={styles.profileCardEmoji}
+            >
               👤
             </Text>
           </View>
 
-          <View style={styles.profileCardContent}>
-            <Text style={styles.profileCardTitle}>
+          <View
+            style={styles.profileCardContent}
+          >
+            <Text
+              style={styles.profileCardTitle}
+            >
               My Profile
             </Text>
 
-            <Text style={styles.profileCardSubtitle}>
-              View and update your profile information
+            <Text
+              style={
+                styles.profileCardSubtitle
+              }
+            >
+              View and update your profile
+              information
             </Text>
           </View>
 
@@ -575,11 +733,15 @@ export default function MaidHome() {
       {/* Bottom Navigation */}
       <View style={styles.bottomNav}>
         <Pressable style={styles.navItem}>
-          <Text style={styles.navIconActive}>
+          <Text
+            style={styles.navIconActive}
+          >
             ⌂
           </Text>
 
-          <Text style={styles.navTextActive}>
+          <Text
+            style={styles.navTextActive}
+          >
             Home
           </Text>
         </Pressable>
@@ -834,7 +996,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    marginBottom: 22,
+    marginBottom: 10,
     elevation: 1,
   },
 
@@ -899,6 +1061,50 @@ const styles = StyleSheet.create({
 
   toggleCircleActive: {
     alignSelf: "flex-end",
+  },
+
+  /* Upcoming Availability */
+
+  upcomingAvailabilityCard: {
+    backgroundColor: "#FFFFFF",
+    borderRadius: 18,
+    padding: 15,
+    marginBottom: 22,
+    flexDirection: "row",
+    alignItems: "center",
+    elevation: 1,
+  },
+
+  upcomingIconContainer: {
+    width: 46,
+    height: 46,
+    borderRadius: 14,
+    backgroundColor: "#EEF4FF",
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 12,
+  },
+
+  upcomingIcon: {
+    fontSize: 22,
+  },
+
+  upcomingContent: {
+    flex: 1,
+  },
+
+  upcomingTitle: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: "#111827",
+    marginBottom: 4,
+  },
+
+  upcomingSubtitle: {
+    fontSize: 12,
+    lineHeight: 17,
+    color: "#6B7280",
+    paddingRight: 8,
   },
 
   bookingCard: {

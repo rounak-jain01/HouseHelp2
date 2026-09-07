@@ -1,20 +1,22 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Modal,
   Pressable,
   SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { router, useLocalSearchParams } from "expo-router";
 
 import { getAuth } from "@react-native-firebase/auth";
 import {
+  Timestamp,
   doc,
-  getDoc,
   getFirestore,
   onSnapshot,
   updateDoc,
@@ -23,192 +25,388 @@ import {
 const auth = getAuth();
 const db = getFirestore();
 
+type BookingStatus =
+  | "pending"
+  | "assigned"
+  | "confirmed"
+  | "in_progress"
+  | "completed"
+  | "cancelled"
+  | "no_maid_found";
+
 type BookingData = {
   categories?: string[];
   duration?: number;
   totalPrice?: number;
-  status?: string;
-  scheduledDateTime?: any;
+  status?: BookingStatus;
+  scheduledDateTime?: Timestamp;
   customerName?: string;
+  maidId?: string | null;
+  cancellationReason?: string;
+  cancelledBy?: string;
+  cancelledAt?: Timestamp;
 };
 
-export default function CustomerWaiting() {
-  const { bookingId } =
-    useLocalSearchParams<{
-      bookingId: string;
-    }>();
+const CANCELLATION_REASONS = [
+  "Changed my plans",
+  "Found another helper",
+  "Helper is taking too long",
+  "Booking details are incorrect",
+  "Price is too high",
+  "Other",
+];
 
-  const [booking, setBooking] =
-    useState<BookingData | null>(null);
+const ACTIVE_STATUSES: BookingStatus[] = [
+  "pending",
+  "assigned",
+  "confirmed",
+  "in_progress",
+];
 
-  const [loading, setLoading] =
-    useState(true);
+const getStatusTitle = (status?: BookingStatus) => {
+  switch (status) {
+    case "assigned":
+      return "Helper Assigned";
 
-  const [cancelling, setCancelling] =
-    useState(false);
+    case "confirmed":
+      return "Booking Confirmed";
+
+    case "in_progress":
+      return "Job In Progress";
+
+    case "completed":
+      return "Job Completed";
+
+    case "cancelled":
+      return "Booking Cancelled";
+
+    case "no_maid_found":
+      return "No Helper Found";
+
+    case "pending":
+    default:
+      return "Finding a Helper";
+  }
+};
+
+const getStatusDescription = (status?: BookingStatus) => {
+  switch (status) {
+    case "assigned":
+      return "A helper has been assigned to your booking.";
+
+    case "confirmed":
+      return "Your helper has accepted the booking.";
+
+    case "in_progress":
+      return "Your helper has started the job.";
+
+    case "completed":
+      return "This booking has been completed successfully.";
+
+    case "cancelled":
+      return "This booking has been cancelled.";
+
+    case "no_maid_found":
+      return "We could not find an available helper for this booking.";
+
+    case "pending":
+    default:
+      return "We're looking for an available helper for you.";
+  }
+};
+
+const getStatusIcon = (status?: BookingStatus) => {
+  switch (status) {
+    case "assigned":
+      return "✓";
+
+    case "confirmed":
+      return "✓";
+
+    case "in_progress":
+      return "●";
+
+    case "completed":
+      return "✓";
+
+    case "cancelled":
+      return "×";
+
+    case "no_maid_found":
+      return "!";
+
+    case "pending":
+    default:
+      return "⌛";
+  }
+};
+
+/**
+ * IMPORTANT:
+ * This function is ONLY for the View background.
+ * Do not put `color` here because ViewStyle doesn't support color.
+ */
+const getStatusIconBackgroundStyle = (status?: BookingStatus) => {
+  switch (status) {
+    case "assigned":
+    case "confirmed":
+    case "completed":
+      return styles.statusIconSuccess;
+
+    case "in_progress":
+      return styles.statusIconInfo;
+
+    case "cancelled":
+    case "no_maid_found":
+      return styles.statusIconDanger;
+
+    case "pending":
+    default:
+      return styles.statusIconPending;
+  }
+};
+
+/**
+ * This function is ONLY for Text color.
+ */
+const getStatusIconTextStyle = (status?: BookingStatus) => {
+  switch (status) {
+    case "assigned":
+    case "confirmed":
+    case "completed":
+      return styles.heroIconSuccess;
+
+    case "in_progress":
+      return styles.heroIconInfo;
+
+    case "cancelled":
+    case "no_maid_found":
+      return styles.heroIconDanger;
+
+    case "pending":
+    default:
+      return styles.heroIconPending;
+  }
+};
+
+const getStepState = (
+  status: BookingStatus | undefined,
+  step: number
+): "completed" | "active" | "pending" => {
+  if (status === "cancelled" || status === "no_maid_found") {
+    return "pending";
+  }
+
+  switch (status) {
+    case "pending":
+      return step === 1 ? "active" : "pending";
+
+    case "assigned":
+      if (step <= 2) return step === 2 ? "active" : "completed";
+      return "pending";
+
+    case "confirmed":
+      if (step <= 2) return "completed";
+      if (step === 3) return "active";
+      return "pending";
+
+    case "in_progress":
+      if (step <= 3) return "completed";
+      if (step === 4) return "active";
+      return "pending";
+
+    case "completed":
+      return "completed";
+
+    default:
+      return "pending";
+  }
+};
+
+const formatDateTime = (timestamp?: Timestamp) => {
+  if (!timestamp) return "Not available";
+
+  const date = timestamp.toDate();
+
+  return date.toLocaleString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+};
+
+export default function WaitingScreen() {
+  const { bookingId } = useLocalSearchParams<{
+    bookingId?: string;
+  }>();
+
+  const [booking, setBooking] = useState<BookingData | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const [cancelModalVisible, setCancelModalVisible] = useState(false);
+  const [selectedReason, setSelectedReason] = useState("");
+  const [otherReason, setOtherReason] = useState("");
+  const [cancelling, setCancelling] = useState(false);
 
   useEffect(() => {
     if (!bookingId) {
-      setLoading(false);
+      Alert.alert(
+        "Booking Not Found",
+        "Booking ID is missing.",
+        [
+          {
+            text: "Go Home",
+            onPress: () => router.replace("/customer"),
+          },
+        ]
+      );
+
       return;
     }
 
-    const bookingRef = doc(
-      db,
-      "bookings",
-      bookingId
-    );
+    const bookingRef = doc(db, "bookings", bookingId);
 
     const unsubscribe = onSnapshot(
       bookingRef,
       (snapshot) => {
-        if (!snapshot.exists()) {
+        if (!snapshot.exists) {
           setLoading(false);
-          return;
-        }
 
-        const data =
-          snapshot.data() as BookingData;
-
-        setBooking(data);
-        setLoading(false);
-
-        // Assignment will be connected next.
-        if (data.status === "assigned") {
           Alert.alert(
-            "Helper Found!",
-            "A helper has been assigned to your booking."
-          );
-        }
-
-        if (data.status === "no_maid_found") {
-          Alert.alert(
-            "No Helper Available",
-            "We couldn't find a helper for this booking.",
+            "Booking Not Found",
+            "This booking does not exist.",
             [
               {
-                text: "Go Back",
-                onPress: () =>
-                  router.replace(
-                    "/customer"
-                  ),
+                text: "Go Home",
+                onPress: () => router.replace("/customer"),
               },
             ]
           );
+
+          return;
         }
 
-        if (data.status === "cancelled") {
-          router.replace("/customer");
-        }
+        const data = snapshot.data() as BookingData;
+
+        setBooking(data);
+        setLoading(false);
       },
       (error) => {
-        console.error(
-          "WAITING SNAPSHOT ERROR:",
-          error
-        );
+        console.error("WAITING SCREEN SNAPSHOT ERROR:", error);
 
         setLoading(false);
+
+        Alert.alert(
+          "Something went wrong",
+          "Unable to load your booking.",
+          [
+            {
+              text: "Go Back",
+              onPress: () => router.replace("/customer"),
+            },
+          ]
+        );
       }
     );
 
     return unsubscribe;
   }, [bookingId]);
 
-  const loadBooking = async () => {
-    if (!bookingId) return;
+  const status = booking?.status || "pending";
 
-    try {
-      const bookingRef = doc(
-        db,
-        "bookings",
-        bookingId
-      );
+  const canCancel = useMemo(() => {
+    return ACTIVE_STATUSES.includes(status);
+  }, [status]);
 
-      const snapshot =
-        await getDoc(bookingRef);
-
-      if (snapshot.exists()) {
-        setBooking(
-          snapshot.data() as BookingData
-        );
-      }
-    } catch (error) {
-      console.error(
-        "LOAD BOOKING ERROR:",
-        error
-      );
-    }
+  const openCancelModal = () => {
+    setSelectedReason("");
+    setOtherReason("");
+    setCancelModalVisible(true);
   };
 
-  const cancelSearch = async () => {
-    if (!bookingId || cancelling) {
+  const closeCancelModal = () => {
+    if (cancelling) return;
+
+    setCancelModalVisible(false);
+    setSelectedReason("");
+    setOtherReason("");
+  };
+
+  const confirmCancellation = async () => {
+    if (!bookingId) return;
+
+    if (!selectedReason) {
+      Alert.alert("Select a reason", "Please select a cancellation reason.");
       return;
+    }
+
+    let finalReason = selectedReason;
+
+    if (selectedReason === "Other") {
+      finalReason = otherReason.trim();
+
+      if (!finalReason) {
+        Alert.alert(
+          "Enter a reason",
+          "Please tell us why you want to cancel the booking."
+        );
+        return;
+      }
     }
 
     try {
       setCancelling(true);
 
-      const user = auth.currentUser;
-
-      if (!user) {
-        router.replace("/auth/login");
-        return;
-      }
-
-      const bookingRef = doc(
-        db,
-        "bookings",
-        bookingId
-      );
+      const bookingRef = doc(db, "bookings", bookingId);
 
       await updateDoc(bookingRef, {
         status: "cancelled",
-        cancelledAt: new Date(),
+        cancellationReason: finalReason,
+        cancelledBy: "customer",
+        cancelledAt: Timestamp.now(),
       });
 
-      router.replace("/customer");
-    } catch (error) {
-      console.error(
-        "CANCEL SEARCH ERROR:",
-        error
-      );
+      setCancelModalVisible(false);
 
       Alert.alert(
-        "Unable to Cancel",
-        "Please try again."
+        "Booking Cancelled",
+        "Your booking has been cancelled successfully.",
+        [
+          {
+            text: "Go to Bookings",
+            onPress: () => router.replace("/customer/bookings"),
+          },
+        ]
+      );
+    } catch (error) {
+      console.error("CANCEL BOOKING ERROR:", error);
+
+      Alert.alert(
+        "Cancellation Failed",
+        "We couldn't cancel your booking. Please try again."
       );
     } finally {
       setCancelling(false);
     }
   };
 
-  const formatDateTime = (
-    timestamp: any
-  ) => {
-    if (!timestamp?.toDate) {
-      return "Time unavailable";
-    }
+  const goToBookings = () => {
+    router.replace("/customer/bookings");
+  };
 
-    return timestamp
-      .toDate()
-      .toLocaleString("en-IN", {
-        day: "numeric",
-        month: "short",
-        year: "numeric",
-        hour: "numeric",
-        minute: "2-digit",
-      });
+  const goToHome = () => {
+    router.replace("/customer");
   };
 
   if (loading) {
     return (
-      <SafeAreaView
-        style={styles.loadingContainer}
-      >
+      <SafeAreaView style={styles.loadingContainer}>
         <ActivityIndicator size="large" />
 
         <Text style={styles.loadingText}>
-          Loading your booking...
+          Loading booking...
         </Text>
       </SafeAreaView>
     );
@@ -216,20 +414,16 @@ export default function CustomerWaiting() {
 
   if (!booking) {
     return (
-      <SafeAreaView
-        style={styles.loadingContainer}
-      >
-        <Text style={styles.errorTitle}>
+      <SafeAreaView style={styles.loadingContainer}>
+        <Text style={styles.emptyTitle}>
           Booking not found
         </Text>
 
         <Pressable
-          style={styles.backButton}
-          onPress={() =>
-            router.replace("/customer")
-          }
+          style={styles.primaryButton}
+          onPress={goToHome}
         >
-          <Text style={styles.backButtonText}>
+          <Text style={styles.primaryButtonText}>
             Go Home
           </Text>
         </Pressable>
@@ -238,352 +432,1021 @@ export default function CustomerWaiting() {
   }
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={styles.safeArea}>
       <ScrollView
-        contentContainerStyle={styles.content}
+        contentContainerStyle={styles.container}
+        showsVerticalScrollIndicator={false}
       >
-        {/* Loader */}
-        <View style={styles.loaderSection}>
-          <View style={styles.loaderCircle}>
-            <ActivityIndicator
-              size="large"
-            />
-          </View>
-
-          <Text style={styles.title}>
-            Finding a helper for you...
-          </Text>
-
-          <Text style={styles.subtitle}>
-            This usually takes a minute
-          </Text>
-        </View>
-
-        {/* Status */}
-        <View style={styles.statusCard}>
-          <View style={styles.statusDot} />
-
-          <View style={styles.statusContent}>
-            <Text style={styles.statusTitle}>
-              We're looking for an available helper
-            </Text>
-
-            <Text style={styles.statusText}>
-              Your booking has been received and
-              we're checking verified helpers in your
-              area.
-            </Text>
-          </View>
-        </View>
-
-        {/* Booking Summary */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>
-            Booking Summary
-          </Text>
-
-          <View style={styles.summaryCard}>
-            <View style={styles.summaryRow}>
-              <Text style={styles.label}>
-                Services
-              </Text>
-
-              <Text style={styles.value}>
-                {booking.categories?.join(
-                  ", "
-                ) || "Not available"}
-              </Text>
-            </View>
-
-            <View style={styles.divider} />
-
-            <View style={styles.summaryRow}>
-              <Text style={styles.label}>
-                Duration
-              </Text>
-
-              <Text style={styles.value}>
-                {booking.duration || 0} hr
-              </Text>
-            </View>
-
-            <View style={styles.divider} />
-
-            <View style={styles.summaryRow}>
-              <Text style={styles.label}>
-                Date & Time
-              </Text>
-
-              <Text style={styles.value}>
-                {formatDateTime(
-                  booking.scheduledDateTime
-                )}
-              </Text>
-            </View>
-
-            <View style={styles.divider} />
-
-            <View style={styles.summaryRow}>
-              <Text style={styles.label}>
-                Total
-              </Text>
-
-              <Text style={styles.totalValue}>
-                ₹{booking.totalPrice || 0}
-              </Text>
-            </View>
-          </View>
-        </View>
-
-        {/* Current Status */}
-        <View style={styles.currentStatusCard}>
-          <Text style={styles.currentStatusLabel}>
-            Current Status
-          </Text>
-
-          <Text style={styles.currentStatusValue}>
-            {booking.status || "pending"}
-          </Text>
-        </View>
-
-        {/* Cancel */}
-        {booking.status === "pending" && (
+        {/* Header */}
+        <View style={styles.header}>
           <Pressable
-            style={[
-              styles.cancelButton,
-              cancelling &&
-                styles.cancelButtonDisabled,
-            ]}
-            disabled={cancelling}
-            onPress={cancelSearch}
+            onPress={goToBookings}
+            style={styles.backButton}
           >
-            {cancelling ? (
-              <ActivityIndicator />
-            ) : (
-              <Text
-                style={
-                  styles.cancelButtonText
-                }
-              >
-                Cancel Search
-              </Text>
-            )}
+            <Text style={styles.backButtonText}>
+              ‹
+            </Text>
           </Pressable>
+
+          <Text style={styles.headerTitle}>
+            Booking Status
+          </Text>
+
+          <View style={styles.headerSpacer} />
+        </View>
+
+        {/* Hero */}
+        <View style={styles.heroCard}>
+          <View
+            style={[
+              styles.heroIcon,
+              getStatusIconBackgroundStyle(status),
+            ]}
+          >
+            <Text
+              style={[
+                styles.heroIconText,
+                getStatusIconTextStyle(status),
+              ]}
+            >
+              {getStatusIcon(status)}
+            </Text>
+          </View>
+
+          <Text style={styles.heroTitle}>
+            {getStatusTitle(status)}
+          </Text>
+
+          <Text style={styles.heroDescription}>
+            {getStatusDescription(status)}
+          </Text>
+
+          {status === "pending" && (
+            <ActivityIndicator
+              size="small"
+              style={styles.heroLoader}
+            />
+          )}
+        </View>
+
+        {/* Progress */}
+        {!["cancelled", "no_maid_found"].includes(status) && (
+          <View style={styles.progressCard}>
+            <Text style={styles.sectionTitle}>
+              Booking Progress
+            </Text>
+
+            <View style={styles.progressContainer}>
+              {[
+                {
+                  step: 1,
+                  title: "Finding Helper",
+                },
+                {
+                  step: 2,
+                  title: "Helper Assigned",
+                },
+                {
+                  step: 3,
+                  title: "Booking Confirmed",
+                },
+                {
+                  step: 4,
+                  title: "Job Started",
+                },
+              ].map((item, index) => {
+                const state = getStepState(status, item.step);
+
+                return (
+                  <View
+                    key={item.step}
+                    style={styles.progressRow}
+                  >
+                    <View style={styles.progressLeft}>
+                      <View
+                        style={[
+                          styles.stepCircle,
+                          state === "completed" &&
+                            styles.stepCircleCompleted,
+                          state === "active" &&
+                            styles.stepCircleActive,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.stepNumber,
+                            (state === "completed" ||
+                              state === "active") &&
+                              styles.stepNumberActive,
+                          ]}
+                        >
+                          {state === "completed"
+                            ? "✓"
+                            : item.step}
+                        </Text>
+                      </View>
+
+                      {index < 3 && (
+                        <View
+                          style={[
+                            styles.stepLine,
+                            state === "completed" &&
+                              styles.stepLineCompleted,
+                          ]}
+                        />
+                      )}
+                    </View>
+
+                    <Text
+                      style={[
+                        styles.stepTitle,
+                        state === "active" &&
+                          styles.stepTitleActive,
+                        state === "completed" &&
+                          styles.stepTitleCompleted,
+                      ]}
+                    >
+                      {item.title}
+                    </Text>
+                  </View>
+                );
+              })}
+            </View>
+          </View>
         )}
 
-        <Text style={styles.footerText}>
-          We'll notify you as soon as a helper accepts
-          your booking.
-        </Text>
+        {/* Booking Details */}
+        <View style={styles.detailsCard}>
+          <Text style={styles.sectionTitle}>
+            Booking Details
+          </Text>
+
+          <View style={styles.detailRow}>
+            <Text style={styles.detailLabel}>
+              Categories
+            </Text>
+
+            <Text style={styles.detailValue}>
+              {booking.categories?.length
+                ? booking.categories
+                    .map((item) =>
+                      item
+                        .replace(/_/g, " ")
+                        .replace(/\b\w/g, (char) =>
+                          char.toUpperCase()
+                        )
+                    )
+                    .join(", ")
+                : "Not available"}
+            </Text>
+          </View>
+
+          <View style={styles.detailDivider} />
+
+          <View style={styles.detailRow}>
+            <Text style={styles.detailLabel}>
+              Duration
+            </Text>
+
+            <Text style={styles.detailValue}>
+              {booking.duration
+                ? `${booking.duration} ${
+                    booking.duration === 1
+                      ? "hour"
+                      : "hours"
+                  }`
+                : "Not available"}
+            </Text>
+          </View>
+
+          <View style={styles.detailDivider} />
+
+          <View style={styles.detailRow}>
+            <Text style={styles.detailLabel}>
+              Scheduled For
+            </Text>
+
+            <Text style={styles.detailValue}>
+              {formatDateTime(
+                booking.scheduledDateTime
+              )}
+            </Text>
+          </View>
+
+          <View style={styles.detailDivider} />
+
+          <View style={styles.detailRow}>
+            <Text style={styles.detailLabel}>
+              Total Price
+            </Text>
+
+            <Text style={styles.priceValue}>
+              ₹{booking.totalPrice || 0}
+            </Text>
+          </View>
+        </View>
+
+        {/* Assigned helper info */}
+        {status === "assigned" ||
+        status === "confirmed" ||
+        status === "in_progress" ? (
+          <View style={styles.helperCard}>
+            <View style={styles.helperIcon}>
+              <Text style={styles.helperIconText}>
+                👤
+              </Text>
+            </View>
+
+            <View style={styles.helperInfo}>
+              <Text style={styles.helperTitle}>
+                Your Helper
+              </Text>
+
+              <Text style={styles.helperSubtitle}>
+                Your helper has been assigned to this
+                booking.
+              </Text>
+            </View>
+          </View>
+        ) : null}
+
+        {/* Cancellation info */}
+        {status === "cancelled" &&
+          booking.cancellationReason && (
+            <View style={styles.cancelledCard}>
+              <Text style={styles.cancelledTitle}>
+                Cancellation Reason
+              </Text>
+
+              <Text style={styles.cancelledReason}>
+                {booking.cancellationReason}
+              </Text>
+
+              {booking.cancelledBy && (
+                <Text style={styles.cancelledBy}>
+                  Cancelled by{" "}
+                  {booking.cancelledBy === "customer"
+                    ? "you"
+                    : booking.cancelledBy}
+                </Text>
+              )}
+            </View>
+          )}
+
+        {/* No helper */}
+        {status === "no_maid_found" && (
+          <View style={styles.warningCard}>
+            <Text style={styles.warningTitle}>
+              No helper is available right now
+            </Text>
+
+            <Text style={styles.warningText}>
+              You can go back and try booking again
+              for another time.
+            </Text>
+          </View>
+        )}
+
+        {/* Buttons */}
+        <View style={styles.actions}>
+          {canCancel && (
+            <Pressable
+              style={styles.cancelButton}
+              onPress={openCancelModal}
+              disabled={cancelling}
+            >
+              <Text style={styles.cancelButtonText}>
+                Cancel Booking
+              </Text>
+            </Pressable>
+          )}
+
+          {status === "completed" && (
+            <Pressable
+              style={styles.primaryButton}
+              onPress={goToBookings}
+            >
+              <Text style={styles.primaryButtonText}>
+                View My Bookings
+              </Text>
+            </Pressable>
+          )}
+
+          {status === "cancelled" && (
+            <Pressable
+              style={styles.primaryButton}
+              onPress={goToBookings}
+            >
+              <Text style={styles.primaryButtonText}>
+                View My Bookings
+              </Text>
+            </Pressable>
+          )}
+
+          {status === "no_maid_found" && (
+            <Pressable
+              style={styles.primaryButton}
+              onPress={goToHome}
+            >
+              <Text style={styles.primaryButtonText}>
+                Back to Home
+              </Text>
+            </Pressable>
+          )}
+
+          {(status === "assigned" ||
+            status === "confirmed" ||
+            status === "in_progress") && (
+            <Pressable
+              style={styles.secondaryButton}
+              onPress={goToBookings}
+            >
+              <Text style={styles.secondaryButtonText}>
+                View All Bookings
+              </Text>
+            </Pressable>
+          )}
+        </View>
       </ScrollView>
+
+      {/* Cancellation Modal */}
+      <Modal
+        visible={cancelModalVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={closeCancelModal}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContainer}>
+            <View style={styles.modalHandle} />
+
+            <Text style={styles.modalTitle}>
+              Cancel Booking
+            </Text>
+
+            <Text style={styles.modalSubtitle}>
+              Please select a reason for cancelling this
+              booking.
+            </Text>
+
+            <ScrollView
+              style={styles.reasonList}
+              showsVerticalScrollIndicator={false}
+            >
+              {CANCELLATION_REASONS.map((reason) => {
+                const selected =
+                  selectedReason === reason;
+
+                return (
+                  <Pressable
+                    key={reason}
+                    style={[
+                      styles.reasonOption,
+                      selected &&
+                        styles.reasonOptionSelected,
+                    ]}
+                    onPress={() =>
+                      setSelectedReason(reason)
+                    }
+                  >
+                    <View
+                      style={[
+                        styles.radioOuter,
+                        selected &&
+                          styles.radioOuterSelected,
+                      ]}
+                    >
+                      {selected && (
+                        <View
+                          style={styles.radioInner}
+                        />
+                      )}
+                    </View>
+
+                    <Text
+                      style={[
+                        styles.reasonText,
+                        selected &&
+                          styles.reasonTextSelected,
+                      ]}
+                    >
+                      {reason}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+
+              {selectedReason === "Other" && (
+                <TextInput
+                  value={otherReason}
+                  onChangeText={setOtherReason}
+                  placeholder="Enter your reason"
+                  placeholderTextColor="#9CA3AF"
+                  multiline
+                  numberOfLines={3}
+                  style={styles.otherInput}
+                  textAlignVertical="top"
+                />
+              )}
+            </ScrollView>
+
+            <View style={styles.modalActions}>
+              <Pressable
+                style={styles.modalBackButton}
+                onPress={closeCancelModal}
+                disabled={cancelling}
+              >
+                <Text style={styles.modalBackText}>
+                  Keep Booking
+                </Text>
+              </Pressable>
+
+              <Pressable
+                style={[
+                  styles.modalCancelButton,
+                  cancelling &&
+                    styles.modalCancelButtonDisabled,
+                ]}
+                onPress={confirmCancellation}
+                disabled={cancelling}
+              >
+                {cancelling ? (
+                  <ActivityIndicator
+                    size="small"
+                    color="#FFFFFF"
+                  />
+                ) : (
+                  <Text style={styles.modalCancelText}>
+                    Cancel Booking
+                  </Text>
+                )}
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  safeArea: {
     flex: 1,
-    backgroundColor: "#F7F8FA",
+    backgroundColor: "#F8FAFC",
   },
 
   loadingContainer: {
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#F7F8FA",
-    padding: 20,
+    backgroundColor: "#F8FAFC",
+    padding: 24,
   },
 
   loadingText: {
     marginTop: 12,
-    color: "#6B7280",
-    fontSize: 14,
+    fontSize: 15,
+    color: "#64748B",
   },
 
-  errorTitle: {
+  emptyTitle: {
+    fontSize: 20,
+    fontWeight: "700",
+    color: "#111827",
+    marginBottom: 20,
+  },
+
+  container: {
+    padding: 20,
+    paddingBottom: 40,
+  },
+
+  header: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 20,
+  },
+
+  backButton: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#FFFFFF",
+    borderWidth: 1,
+    borderColor: "#E5E7EB",
+  },
+
+  backButtonText: {
+    fontSize: 30,
+    lineHeight: 32,
+    color: "#111827",
+    marginTop: -2,
+  },
+
+  headerTitle: {
     fontSize: 20,
     fontWeight: "700",
     color: "#111827",
   },
 
-  backButton: {
-    marginTop: 18,
-    backgroundColor: "#111827",
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    borderRadius: 12,
+  headerSpacer: {
+    width: 42,
   },
 
-  backButtonText: {
-    color: "#FFFFFF",
-    fontWeight: "700",
-  },
-
-  content: {
-    padding: 20,
-    paddingBottom: 40,
-  },
-
-  loaderSection: {
-    alignItems: "center",
-    paddingTop: 35,
-    paddingBottom: 30,
-  },
-
-  loaderCircle: {
-    width: 90,
-    height: 90,
-    borderRadius: 45,
+  heroCard: {
     backgroundColor: "#FFFFFF",
+    borderRadius: 20,
+    padding: 28,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#E5E7EB",
+    marginBottom: 16,
+  },
+
+  heroIcon: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: 25,
-    elevation: 2,
-  },
-
-  title: {
-    fontSize: 23,
-    fontWeight: "700",
-    color: "#111827",
-    textAlign: "center",
-  },
-
-  subtitle: {
-    marginTop: 7,
-    fontSize: 13,
-    color: "#6B7280",
-    textAlign: "center",
-  },
-
-  statusCard: {
-    flexDirection: "row",
-    backgroundColor: "#FFFFFF",
-    borderRadius: 18,
-    padding: 16,
-    marginBottom: 28,
-  },
-
-  statusDot: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    backgroundColor: "#F59E0B",
-    marginTop: 4,
-    marginRight: 12,
-  },
-
-  statusContent: {
-    flex: 1,
-  },
-
-  statusTitle: {
-    fontSize: 14,
-    fontWeight: "700",
-    color: "#111827",
-  },
-
-  statusText: {
-    marginTop: 5,
-    fontSize: 12,
-    lineHeight: 18,
-    color: "#6B7280",
-  },
-
-  section: {
-    marginBottom: 20,
-  },
-
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: "700",
-    color: "#111827",
-    marginBottom: 11,
-  },
-
-  summaryCard: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 18,
-    padding: 17,
-  },
-
-  summaryRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-    gap: 15,
-  },
-
-  label: {
-    fontSize: 12,
-    color: "#6B7280",
-  },
-
-  value: {
-    flex: 1,
-    textAlign: "right",
-    fontSize: 13,
-    fontWeight: "600",
-    color: "#111827",
-  },
-
-  totalValue: {
-    fontSize: 16,
-    fontWeight: "800",
-    color: "#111827",
-  },
-
-  divider: {
-    height: 1,
-    backgroundColor: "#E5E7EB",
-    marginVertical: 14,
-  },
-
-  currentStatusCard: {
-    backgroundColor: "#FFF7E8",
-    borderRadius: 16,
-    padding: 16,
     marginBottom: 18,
   },
 
-  currentStatusLabel: {
-    fontSize: 11,
-    color: "#92400E",
-    textTransform: "uppercase",
+  statusIconSuccess: {
+    backgroundColor: "#DCFCE7",
+  },
+
+  statusIconInfo: {
+    backgroundColor: "#DBEAFE",
+  },
+
+  statusIconDanger: {
+    backgroundColor: "#FEE2E2",
+  },
+
+  statusIconPending: {
+    backgroundColor: "#FEF3C7",
+  },
+
+  heroIconText: {
+    fontSize: 34,
+    fontWeight: "800",
+  },
+
+  heroIconSuccess: {
+    color: "#15803D",
+  },
+
+  heroIconInfo: {
+    color: "#2563EB",
+  },
+
+  heroIconDanger: {
+    color: "#DC2626",
+  },
+
+  heroIconPending: {
+    color: "#B45309",
+  },
+
+  heroTitle: {
+    fontSize: 24,
+    fontWeight: "800",
+    color: "#111827",
+    textAlign: "center",
+  },
+
+  heroDescription: {
+    fontSize: 15,
+    color: "#64748B",
+    textAlign: "center",
+    lineHeight: 22,
+    marginTop: 8,
+    maxWidth: 320,
+  },
+
+  heroLoader: {
+    marginTop: 16,
+  },
+
+  progressCard: {
+    backgroundColor: "#FFFFFF",
+    borderRadius: 18,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: "#E5E7EB",
+    marginBottom: 16,
+  },
+
+  sectionTitle: {
+    fontSize: 17,
+    fontWeight: "700",
+    color: "#111827",
+    marginBottom: 18,
+  },
+
+  progressContainer: {
+    marginTop: 2,
+  },
+
+  progressRow: {
+    flexDirection: "row",
+    minHeight: 56,
+  },
+
+  progressLeft: {
+    width: 34,
+    alignItems: "center",
+  },
+
+  stepCircle: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#E5E7EB",
+  },
+
+  stepCircleCompleted: {
+    backgroundColor: "#16A34A",
+  },
+
+  stepCircleActive: {
+    backgroundColor: "#2563EB",
+  },
+
+  stepNumber: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: "#64748B",
+  },
+
+  stepNumberActive: {
+    color: "#FFFFFF",
+  },
+
+  stepLine: {
+    width: 2,
+    flex: 1,
+    minHeight: 24,
+    backgroundColor: "#E5E7EB",
+  },
+
+  stepLineCompleted: {
+    backgroundColor: "#16A34A",
+  },
+
+  stepTitle: {
+    flex: 1,
+    fontSize: 14,
+    color: "#94A3B8",
+    fontWeight: "500",
+    paddingTop: 7,
+    paddingLeft: 12,
+  },
+
+  stepTitleActive: {
+    color: "#2563EB",
     fontWeight: "700",
   },
 
-  currentStatusValue: {
-    marginTop: 5,
-    fontSize: 15,
-    color: "#92400E",
+  stepTitleCompleted: {
+    color: "#16A34A",
+    fontWeight: "600",
+  },
+
+  detailsCard: {
+    backgroundColor: "#FFFFFF",
+    borderRadius: 18,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: "#E5E7EB",
+    marginBottom: 16,
+  },
+
+  detailRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: 20,
+  },
+
+  detailLabel: {
+    fontSize: 14,
+    color: "#64748B",
+    flex: 1,
+  },
+
+  detailValue: {
+    fontSize: 14,
+    color: "#111827",
+    fontWeight: "600",
+    flex: 1.5,
+    textAlign: "right",
+  },
+
+  priceValue: {
+    fontSize: 16,
+    color: "#111827",
+    fontWeight: "800",
+  },
+
+  detailDivider: {
+    height: 1,
+    backgroundColor: "#F1F5F9",
+    marginVertical: 15,
+  },
+
+  helperCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#EFF6FF",
+    borderRadius: 18,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: "#BFDBFE",
+    marginBottom: 16,
+  },
+
+  helperIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: "#DBEAFE",
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 14,
+  },
+
+  helperIconText: {
+    fontSize: 23,
+  },
+
+  helperInfo: {
+    flex: 1,
+  },
+
+  helperTitle: {
+    fontSize: 16,
     fontWeight: "700",
-    textTransform: "capitalize",
+    color: "#1E3A8A",
+  },
+
+  helperSubtitle: {
+    fontSize: 13,
+    color: "#475569",
+    marginTop: 4,
+    lineHeight: 19,
+  },
+
+  cancelledCard: {
+    backgroundColor: "#FEF2F2",
+    borderRadius: 18,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: "#FECACA",
+    marginBottom: 16,
+  },
+
+  cancelledTitle: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#991B1B",
+  },
+
+  cancelledReason: {
+    fontSize: 14,
+    color: "#7F1D1D",
+    marginTop: 8,
+    lineHeight: 20,
+  },
+
+  cancelledBy: {
+    fontSize: 12,
+    color: "#991B1B",
+    marginTop: 8,
+  },
+
+  warningCard: {
+    backgroundColor: "#FFFBEB",
+    borderRadius: 18,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: "#FDE68A",
+    marginBottom: 16,
+  },
+
+  warningTitle: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#92400E",
+  },
+
+  warningText: {
+    fontSize: 14,
+    color: "#78350F",
+    marginTop: 6,
+    lineHeight: 20,
+  },
+
+  actions: {
+    gap: 12,
+    marginTop: 4,
+  },
+
+  primaryButton: {
+    backgroundColor: "#111827",
+    minHeight: 52,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 20,
+  },
+
+  primaryButtonText: {
+    color: "#FFFFFF",
+    fontSize: 15,
+    fontWeight: "700",
+  },
+
+  secondaryButton: {
+    backgroundColor: "#FFFFFF",
+    minHeight: 52,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 20,
+    borderWidth: 1,
+    borderColor: "#D1D5DB",
+  },
+
+  secondaryButtonText: {
+    color: "#111827",
+    fontSize: 15,
+    fontWeight: "700",
   },
 
   cancelButton: {
-    height: 52,
+    minHeight: 52,
     borderRadius: 14,
-    borderWidth: 1,
-    borderColor: "#DC2626",
     alignItems: "center",
     justifyContent: "center",
-  },
-
-  cancelButtonDisabled: {
-    opacity: 0.5,
+    paddingHorizontal: 20,
+    backgroundColor: "#FFFFFF",
+    borderWidth: 1,
+    borderColor: "#FCA5A5",
   },
 
   cancelButtonText: {
     color: "#DC2626",
+    fontSize: 15,
+    fontWeight: "700",
+  },
+
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    justifyContent: "flex-end",
+  },
+
+  modalContainer: {
+    backgroundColor: "#FFFFFF",
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    paddingBottom: 28,
+    maxHeight: "85%",
+  },
+
+  modalHandle: {
+    width: 42,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: "#D1D5DB",
+    alignSelf: "center",
+    marginBottom: 18,
+  },
+
+  modalTitle: {
+    fontSize: 22,
+    fontWeight: "800",
+    color: "#111827",
+  },
+
+  modalSubtitle: {
+    fontSize: 14,
+    color: "#64748B",
+    marginTop: 6,
+    lineHeight: 20,
+  },
+
+  reasonList: {
+    marginTop: 18,
+  },
+
+  reasonOption: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#E5E7EB",
+    marginBottom: 10,
+  },
+
+  reasonOptionSelected: {
+    borderColor: "#111827",
+    backgroundColor: "#F8FAFC",
+  },
+
+  radioOuter: {
+    width: 21,
+    height: 21,
+    borderRadius: 11,
+    borderWidth: 2,
+    borderColor: "#CBD5E1",
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 12,
+  },
+
+  radioOuterSelected: {
+    borderColor: "#111827",
+  },
+
+  radioInner: {
+    width: 11,
+    height: 11,
+    borderRadius: 6,
+    backgroundColor: "#111827",
+  },
+
+  reasonText: {
+    flex: 1,
+    fontSize: 14,
+    color: "#475569",
+  },
+
+  reasonTextSelected: {
+    color: "#111827",
+    fontWeight: "600",
+  },
+
+  otherInput: {
+    minHeight: 90,
+    borderWidth: 1,
+    borderColor: "#D1D5DB",
+    borderRadius: 12,
+    padding: 12,
+    fontSize: 14,
+    color: "#111827",
+    backgroundColor: "#FFFFFF",
+    marginBottom: 10,
+  },
+
+  modalActions: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 12,
+  },
+
+  modalBackButton: {
+    flex: 1,
+    minHeight: 50,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#F1F5F9",
+  },
+
+  modalBackText: {
+    color: "#111827",
     fontSize: 14,
     fontWeight: "700",
   },
 
-  footerText: {
-    marginTop: 18,
-    textAlign: "center",
-    fontSize: 11,
-    lineHeight: 17,
-    color: "#9CA3AF",
+  modalCancelButton: {
+    flex: 1,
+    minHeight: 50,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#DC2626",
+  },
+
+  modalCancelButtonDisabled: {
+    opacity: 0.6,
+  },
+
+  modalCancelText: {
+    color: "#FFFFFF",
+    fontSize: 14,
+    fontWeight: "700",
   },
 });
