@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Image,
   Modal,
   Pressable,
   SafeAreaView,
@@ -34,6 +35,15 @@ type BookingStatus =
   | "cancelled"
   | "no_maid_found";
 
+type MaidDetails = {
+  name?: string;
+  phoneNumber?: string;
+  photoUrl?: string;
+  verificationStatus?: "pending" | "verified" | "rejected";
+  serviceCategories?: string[];
+  serviceArea?: string;
+};
+
 type BookingData = {
   categories?: string[];
   duration?: number;
@@ -42,6 +52,7 @@ type BookingData = {
   scheduledDateTime?: Timestamp;
   customerName?: string;
   maidId?: string | null;
+  maidDetails?: MaidDetails | null;
   cancellationReason?: string;
   cancelledBy?: string;
   cancelledAt?: Timestamp;
@@ -244,6 +255,8 @@ export default function WaitingScreen() {
 
   const [booking, setBooking] = useState<BookingData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [maidDetails, setMaidDetails] = useState<MaidDetails | null>(null);
+  const [maidLoading, setMaidLoading] = useState(false);
 
   const [cancelModalVisible, setCancelModalVisible] = useState(false);
   const [selectedReason, setSelectedReason] = useState("");
@@ -270,7 +283,7 @@ export default function WaitingScreen() {
 
     const unsubscribe = onSnapshot(
       bookingRef,
-      (snapshot) => {
+      async (snapshot) => {
         if (!snapshot.exists) {
           setLoading(false);
 
@@ -291,6 +304,19 @@ export default function WaitingScreen() {
         const data = snapshot.data() as BookingData;
 
         setBooking(data);
+
+        if (
+          data.maidId &&
+          (data.status === "assigned" ||
+            data.status === "confirmed" ||
+            data.status === "in_progress")
+        ) {
+          setMaidDetails(data.maidDetails ?? null);
+        } else {
+          setMaidDetails(null);
+        }
+
+        setMaidLoading(false);
         setLoading(false);
       },
       (error) => {
@@ -647,28 +673,98 @@ export default function WaitingScreen() {
         </View>
 
         {/* Assigned helper info */}
-        {status === "assigned" ||
-        status === "confirmed" ||
-        status === "in_progress" ? (
+        {(status === "assigned" ||
+          status === "confirmed" ||
+          status === "in_progress") && (
           <View style={styles.helperCard}>
-            <View style={styles.helperIcon}>
-              <Text style={styles.helperIconText}>
-                👤
-              </Text>
-            </View>
+            {maidLoading ? (
+              <View style={styles.helperLoading}>
+                <ActivityIndicator size="small" />
+                <Text style={styles.helperSubtitle}>
+                  Loading helper details...
+                </Text>
+              </View>
+            ) : maidDetails ? (
+              <>
+                <View style={styles.helperTopRow}>
+                  {maidDetails.photoUrl ? (
+                    <Image
+                      source={{ uri: maidDetails.photoUrl }}
+                      style={styles.helperPhoto}
+                    />
+                  ) : (
+                    <View style={styles.helperIcon}>
+                      <Text style={styles.helperIconText}>👤</Text>
+                    </View>
+                  )}
 
-            <View style={styles.helperInfo}>
-              <Text style={styles.helperTitle}>
-                Your Helper
-              </Text>
+                  <View style={styles.helperInfo}>
+                    <View style={styles.helperNameRow}>
+                      <Text style={styles.helperTitle}>
+                        {maidDetails.name || "Your Helper"}
+                      </Text>
 
-              <Text style={styles.helperSubtitle}>
-                Your helper has been assigned to this
-                booking.
-              </Text>
-            </View>
+                      {maidDetails.verificationStatus === "verified" && (
+                        <View style={styles.verifiedBadge}>
+                          <Text style={styles.verifiedBadgeText}>✓ Verified</Text>
+                        </View>
+                      )}
+                    </View>
+
+                    <Text style={styles.helperSubtitle}>
+                      Your helper has accepted this booking.
+                    </Text>
+                  </View>
+                </View>
+
+                {maidDetails.phoneNumber ? (
+                  <View style={styles.helperDetailRow}>
+                    <Text style={styles.helperDetailIcon}>☎</Text>
+                    <Text style={styles.helperDetailText}>
+                      {maidDetails.phoneNumber}
+                    </Text>
+                  </View>
+                ) : null}
+
+                {maidDetails.serviceCategories?.length ? (
+                  <View style={styles.helperDetailRow}>
+                    <Text style={styles.helperDetailIcon}>🧹</Text>
+                    <Text style={styles.helperDetailText}>
+                      {maidDetails.serviceCategories
+                        .map((item) =>
+                          item
+                            .replace(/_/g, " ")
+                            .replace(/\b\w/g, (char) => char.toUpperCase())
+                        )
+                        .join(", ")}
+                    </Text>
+                  </View>
+                ) : null}
+
+                {maidDetails.serviceArea ? (
+                  <View style={styles.helperDetailRow}>
+                    <Text style={styles.helperDetailIcon}>📍</Text>
+                    <Text style={styles.helperDetailText}>
+                      {maidDetails.serviceArea}
+                    </Text>
+                  </View>
+                ) : null}
+              </>
+            ) : (
+              <View style={styles.helperTopRow}>
+                <View style={styles.helperIcon}>
+                  <Text style={styles.helperIconText}>👤</Text>
+                </View>
+                <View style={styles.helperInfo}>
+                  <Text style={styles.helperTitle}>Your Helper</Text>
+                  <Text style={styles.helperSubtitle}>
+                    Your helper has been assigned to this booking.
+                  </Text>
+                </View>
+              </View>
+            )}
           </View>
-        ) : null}
+        )}
 
         {/* Cancellation info */}
         {status === "cancelled" &&
@@ -1162,6 +1258,77 @@ const styles = StyleSheet.create({
   },
 
   helperCard: {
+    backgroundColor: "#EFF6FF",
+    borderRadius: 18,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: "#BFDBFE",
+    marginBottom: 16,
+  },
+
+  helperTopRow: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+
+  helperLoading: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+
+  helperPhoto: {
+    width: 58,
+    height: 58,
+    borderRadius: 29,
+    backgroundColor: "#DBEAFE",
+    marginRight: 14,
+  },
+
+  helperNameRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+
+  verifiedBadge: {
+    backgroundColor: "#DCFCE7",
+    borderRadius: 8,
+    paddingHorizontal: 7,
+    paddingVertical: 4,
+  },
+
+  verifiedBadgeText: {
+    color: "#15803D",
+    fontSize: 11,
+    fontWeight: "700",
+  },
+
+  helperDetailRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 13,
+    paddingTop: 11,
+    borderTopWidth: 1,
+    borderTopColor: "#DBEAFE",
+  },
+
+  helperDetailIcon: {
+    width: 28,
+    fontSize: 16,
+    textAlign: "center",
+  },
+
+  helperDetailText: {
+    flex: 1,
+    marginLeft: 8,
+    fontSize: 13,
+    color: "#334155",
+    lineHeight: 19,
+  },
+
+  helperCardOld: {
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: "#EFF6FF",

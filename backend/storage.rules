@@ -3,11 +3,19 @@ rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
 
+    // Maid ID Proof
     match /maid-id-proofs/{maidId}/{fileName} {
       allow read, write: if request.auth != null
                           && request.auth.uid == maidId;
     }
 
+    // Maid Profile Photo
+    match /maid-profile-photos/{maidId}/{fileName} {
+      allow read, write: if request.auth != null
+                          && request.auth.uid == maidId;
+    }
+
+    // Deny everything else
     match /{allPaths=**} {
       allow read, write: if false;
     }

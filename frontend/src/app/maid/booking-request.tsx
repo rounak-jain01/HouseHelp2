@@ -72,12 +72,52 @@ type CallableResponse = {
   message?: string;
 };
 
+function calculateDistanceKm(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number {
+  const earthRadiusKm = 6371;
+
+  const toRadians = (value: number) =>
+    (value * Math.PI) / 180;
+
+  const dLat = toRadians(lat2 - lat1);
+  const dLon = toRadians(lon2 - lon1);
+
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRadians(lat1)) *
+      Math.cos(toRadians(lat2)) *
+      Math.sin(dLon / 2) ** 2;
+
+  const c =
+    2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  return earthRadiusKm * c;
+}
+
+function formatDistance(distanceKm: number): string {
+  if (distanceKm < 1) {
+    return `${Math.round(distanceKm * 1000)} m away`;
+  }
+
+  return `${distanceKm.toFixed(1)} km away`;
+}
+
 export default function BookingRequestScreen() {
   const { bookingId } =
     useLocalSearchParams<{ bookingId: string }>();
 
   const [booking, setBooking] =
     useState<Booking | null>(null);
+
+  const [maidLocation, setMaidLocation] =
+    useState<{
+      latitude: number;
+      longitude: number;
+    } | null>(null);
 
   const [loading, setLoading] =
     useState(true);
@@ -92,6 +132,65 @@ export default function BookingRequestScreen() {
     useState(false);
 
   const maidId = auth.currentUser?.uid;
+
+  /*
+   * =========================================================
+   * LOAD CURRENT MAID LOCATION
+   * =========================================================
+   *
+   * The maid reads only their own profile document.
+   * The location is then used to calculate the distance
+   * from the customer location stored in the booking.
+   */
+  useEffect(() => {
+    if (!maidId) {
+      setMaidLocation(null);
+      return;
+    }
+
+    const maidRef = doc(db, "maids", maidId);
+
+    const unsubscribe = onSnapshot(
+      maidRef,
+      (snapshot) => {
+        if (!snapshot.exists()) {
+          setMaidLocation(null);
+          return;
+        }
+
+        const data = snapshot.data() as {
+          currentLocation?: {
+            latitude?: number;
+            longitude?: number;
+          };
+        };
+
+        const latitude = data.currentLocation?.latitude;
+        const longitude = data.currentLocation?.longitude;
+
+        if (
+          typeof latitude === "number" &&
+          typeof longitude === "number"
+        ) {
+          setMaidLocation({
+            latitude,
+            longitude,
+          });
+        } else {
+          setMaidLocation(null);
+        }
+      },
+      (error) => {
+        console.log(
+          "Maid location listener error:",
+          error
+        );
+        setMaidLocation(null);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [maidId]);
 
   /*
    * =========================================================
@@ -711,7 +810,30 @@ export default function BookingRequestScreen() {
             </Text>
 
             <Text style={styles.value}>
-              Not available yet
+              {(() => {
+                const customerLatitude =
+                  booking.customerAddress?.latitude;
+
+                const customerLongitude =
+                  booking.customerAddress?.longitude;
+
+                if (
+                  typeof customerLatitude !== "number" ||
+                  typeof customerLongitude !== "number" ||
+                  !maidLocation
+                ) {
+                  return "Distance unavailable";
+                }
+
+                const distanceKm = calculateDistanceKm(
+                  maidLocation.latitude,
+                  maidLocation.longitude,
+                  customerLatitude,
+                  customerLongitude
+                );
+
+                return formatDistance(distanceKm);
+              })()}
             </Text>
           </View>
         </View>

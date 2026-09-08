@@ -49,6 +49,15 @@ type Booking = {
   customerId?: string;
   maidId?: string | null;
 
+  maidDetails?: {
+    name?: string;
+    phoneNumber?: string;
+    photoUrl?: string;
+    verificationStatus?: "pending" | "verified" | "rejected";
+    serviceCategories?: string[];
+    serviceArea?: string;
+  } | null;
+
   categories?: string[];
 
   duration?: number;
@@ -123,6 +132,8 @@ type Maid = {
   name?: string;
 
   phoneNumber?: string;
+
+  photoUrl?: string;
 
   role?: "maid";
 
@@ -1114,6 +1125,15 @@ export const acceptBooking = onCall(async (request) => {
       status: "confirmed",
 
       maidId,
+
+      maidDetails: {
+        name: maid.name ?? "",
+        phoneNumber: maid.phoneNumber ?? "",
+        photoUrl: maid.photoUrl ?? "",
+        verificationStatus: maid.verificationStatus ?? "verified",
+        serviceCategories: maid.serviceCategories ?? [],
+        serviceArea: maid.serviceArea ?? "",
+      },
 
       winningMaidId: maidId,
 

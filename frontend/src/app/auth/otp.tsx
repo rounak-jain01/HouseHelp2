@@ -1,4 +1,10 @@
-import React, { useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -9,161 +15,486 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import { router, useLocalSearchParams } from "expo-router";
-import { getFirestore, doc, getDoc } from "@react-native-firebase/firestore";
 
-import { verifyOTP, sendOTP } from "@/services/auth";
+import { router, useLocalSearchParams } from "expo-router";
+
+import {
+  getFirestore,
+  doc,
+  getDoc,
+} from "@react-native-firebase/firestore";
+
+import {
+  getAuth,
+} from "@react-native-firebase/auth";
+
+import * as Location from "expo-location";
+
+import {
+  verifyOTP,
+  sendOTP,
+} from "@/services/auth";
+
+import {
+  createNotificationChannel,
+  requestNotificationPermission,
+} from "@/services/notifications";
 
 const db = getFirestore();
+const auth = getAuth();
+
+const RESEND_COOLDOWN = 30;
 
 export default function OTPScreen() {
-  const { phone, role } = useLocalSearchParams<{
-    phone: string;
-    role: "customer" | "maid";
-  }>();
+  const { phone, role } =
+    useLocalSearchParams<{
+      phone: string;
+      role: "customer" | "maid";
+    }>();
 
   const [code, setCode] = useState("");
   const [loading, setLoading] = useState(false);
   const [resending, setResending] = useState(false);
   const [error, setError] = useState("");
+  const [resendCooldown, setResendCooldown] =
+    useState(RESEND_COOLDOWN);
 
-  const handleVerify = async () => {
-    try {
-      setError("");
+  const inputRef = useRef<TextInput>(null);
 
-      if (!phone) {
-        setError("Phone number is missing. Please login again.");
-        return;
-      }
+  const verifyingRef = useRef(false);
 
-      if (!role) {
-        setError("Role information is missing. Please login again.");
-        return;
-      }
+  // --------------------------------------------------
+  // RESEND COUNTDOWN
+  // --------------------------------------------------
 
-      if (code.length !== 6) {
-        setError("Please enter the 6-digit OTP.");
-        return;
-      }
+  useEffect(() => {
+    if (resendCooldown <= 0) {
+      return;
+    }
 
-      setLoading(true);
+    const timer = setInterval(() => {
+      setResendCooldown((previous) => {
+        if (previous <= 1) {
+          clearInterval(timer);
+          return 0;
+        }
 
-      // Verify OTP with Firebase
-      const firebaseUser = await verifyOTP(code);
+        return previous - 1;
+      });
+    }, 1000);
 
-      console.log(
-        "OTP verified:",
-        firebaseUser.uid,
-        "Role:",
-        role
-      );
+    return () => {
+      clearInterval(timer);
+    };
+  }, [resendCooldown]);
 
-      // CUSTOMER FLOW
-      if (role === "customer") {
-        const userRef = doc(
-          db,
-          "users",
-          firebaseUser.uid
+  // --------------------------------------------------
+  // REQUEST APP PERMISSIONS AFTER LOGIN
+  // --------------------------------------------------
+
+  const requestPostLoginPermissions =
+    useCallback(async () => {
+      try {
+        console.log(
+          "POST LOGIN PERMISSIONS: STARTING"
         );
 
-        const userSnapshot = await getDoc(userRef);
+        // ----------------------------------------------
+        // LOCATION
+        // ----------------------------------------------
 
-        if (userSnapshot.exists()) {
-          console.log("Existing customer found");
+        try {
+          const locationPermission =
+            await Location.getForegroundPermissionsAsync();
 
-          router.replace("/customer");
+          if (
+            locationPermission.status !==
+            Location.PermissionStatus.GRANTED
+          ) {
+            console.log(
+              "LOCATION PERMISSION: REQUESTING"
+            );
+
+            const result =
+              await Location.requestForegroundPermissionsAsync();
+
+            console.log(
+              "LOCATION PERMISSION:",
+              result.status
+            );
+          } else {
+            console.log(
+              "LOCATION PERMISSION: ALREADY GRANTED"
+            );
+          }
+        } catch (locationError) {
+          console.error(
+            "LOCATION PERMISSION ERROR:",
+            locationError
+          );
+        }
+
+        // ----------------------------------------------
+        // NOTIFICATIONS
+        // ----------------------------------------------
+
+        try {
+          console.log(
+            "NOTIFICATION PERMISSION: CHECKING"
+          );
+
+          await createNotificationChannel();
+
+          const notificationPermission =
+            await requestNotificationPermission();
+
+          console.log(
+            "NOTIFICATION PERMISSION:",
+            notificationPermission
+          );
+        } catch (notificationError) {
+          console.error(
+            "NOTIFICATION PERMISSION ERROR:",
+            notificationError
+          );
+        }
+
+        console.log(
+          "POST LOGIN PERMISSIONS: COMPLETED"
+        );
+      } catch (error) {
+        console.error(
+          "POST LOGIN PERMISSIONS ERROR:",
+          error
+        );
+      }
+    }, [role]);
+
+  // --------------------------------------------------
+  // HANDLE LOGIN SUCCESS
+  // --------------------------------------------------
+
+  const continueAfterLogin =
+    useCallback(
+      async (
+        firebaseUser: any
+      ) => {
+        console.log(
+          "OTP verified:",
+          firebaseUser.uid,
+          "Role:",
+          role
+        );
+
+        // ----------------------------------------------
+        // ASK PERMISSIONS FIRST
+        // ----------------------------------------------
+
+        await requestPostLoginPermissions();
+
+        // ----------------------------------------------
+        // CUSTOMER FLOW
+        // ----------------------------------------------
+
+        if (role === "customer") {
+          const userRef = doc(
+            db,
+            "users",
+            firebaseUser.uid
+          );
+
+          const userSnapshot =
+            await getDoc(userRef);
+
+          if (userSnapshot.exists()) {
+            console.log(
+              "Existing customer found"
+            );
+
+            router.replace("/customer");
+            return;
+          }
+
+          console.log(
+            "New customer"
+          );
+
+          router.replace({
+            pathname:
+              "/customer/profile",
+            params: {
+              phone,
+            },
+          });
+
           return;
         }
 
-        console.log("New customer");
+        // ----------------------------------------------
+        // MAID FLOW
+        // ----------------------------------------------
+
+        const maidRef = doc(
+          db,
+          "maids",
+          firebaseUser.uid
+        );
+
+        const maidSnapshot =
+          await getDoc(maidRef);
+
+        if (maidSnapshot.exists()) {
+          console.log(
+            "Existing maid found"
+          );
+
+          router.replace("/maid");
+          return;
+        }
+
+        console.log(
+          "New maid"
+        );
 
         router.replace({
-          pathname: "/customer/profile",
+          pathname:
+            "/maid/profile",
           params: {
             phone,
           },
         });
+      },
+      [
+        phone,
+        role,
+        requestPostLoginPermissions,
+      ]
+    );
 
-        return;
-      }
+  // --------------------------------------------------
+  // VERIFY OTP
+  // --------------------------------------------------
 
-      // MAID FLOW
-      const maidRef = doc(
-        db,
-        "maids",
-        firebaseUser.uid
-      );
+  const handleVerify =
+    useCallback(
+      async (
+        otpCode?: string
+      ) => {
+        try {
+          setError("");
 
-      const maidSnapshot = await getDoc(maidRef);
+          if (!phone) {
+            setError(
+              "Phone number is missing. Please login again."
+            );
+            return;
+          }
 
-      if (maidSnapshot.exists()) {
-        console.log("Existing maid found");
+          if (!role) {
+            setError(
+              "Role information is missing. Please login again."
+            );
+            return;
+          }
 
-        router.replace("/maid");
-        return;
-      }
+          const finalCode =
+            (
+              otpCode !== undefined
+                ? otpCode
+                : code
+            )
+              .replace(/\D/g, "")
+              .slice(0, 6);
 
-      console.log("New maid");
+          if (finalCode.length !== 6) {
+            setError(
+              "Please enter the 6-digit OTP."
+            );
+            return;
+          }
 
-      router.replace({
-        pathname: "/maid/profile",
-        params: {
-          phone,
-        },
-      });
-    } catch (err: any) {
-      console.error("VERIFY OTP ERROR:", err);
+          // Prevent duplicate verification
+          if (verifyingRef.current) {
+            return;
+          }
 
-      if (err?.code === "auth/invalid-verification-code") {
-        setError(
-          "Invalid OTP. Please check the code and try again."
+          verifyingRef.current = true;
+          setLoading(true);
+
+          console.log(
+            "VERIFYING OTP..."
+          );
+
+          const firebaseUser =
+            await verifyOTP(finalCode);
+
+          console.log(
+            "OTP verification successful"
+          );
+
+          await continueAfterLogin(
+            firebaseUser
+          );
+        } catch (err: any) {
+          console.error(
+            "VERIFY OTP ERROR:",
+            err
+          );
+
+          if (
+            err?.code ===
+            "auth/invalid-verification-code"
+          ) {
+            setError(
+              "Invalid OTP. Please check the code and try again."
+            );
+          } else if (
+            err?.code ===
+            "auth/code-expired"
+          ) {
+            setError(
+              "OTP expired. Please request a new OTP."
+            );
+          } else if (
+            err?.code ===
+            "firestore/permission-denied"
+          ) {
+            setError(
+              "Unable to check your account. Please try again."
+            );
+          } else {
+            setError(
+              err?.message ||
+                "Unable to verify OTP. Please try again."
+            );
+          }
+        } finally {
+          setLoading(false);
+          verifyingRef.current = false;
+        }
+      },
+      [
+        code,
+        phone,
+        role,
+        continueAfterLogin,
+      ]
+    );
+
+  // --------------------------------------------------
+  // OTP INPUT
+  // --------------------------------------------------
+
+  const handleCodeChange =
+    useCallback(
+      (text: string) => {
+        setError("");
+
+        const numbersOnly =
+          text
+            .replace(/\D/g, "")
+            .slice(0, 6);
+
+        setCode(numbersOnly);
+
+        // --------------------------------------------
+        // AUTO VERIFY WHEN 6 DIGITS ARE AVAILABLE
+        // --------------------------------------------
+
+        if (
+          numbersOnly.length === 6 &&
+          !verifyingRef.current &&
+          !loading &&
+          !resending
+        ) {
+          console.log(
+            "6 DIGIT OTP DETECTED - AUTO VERIFY"
+          );
+
+          handleVerify(numbersOnly);
+        }
+      },
+      [
+        handleVerify,
+        loading,
+        resending,
+      ]
+    );
+
+  // --------------------------------------------------
+  // RESEND OTP
+  // --------------------------------------------------
+
+  const handleResend =
+    useCallback(async () => {
+      try {
+        setError("");
+
+        if (!phone) {
+          setError(
+            "Phone number is missing."
+          );
+          return;
+        }
+
+        if (resendCooldown > 0) {
+          return;
+        }
+
+        if (resending || loading) {
+          return;
+        }
+
+        setResending(true);
+
+        console.log(
+          "RESENDING OTP..."
         );
-      } else if (err?.code === "auth/code-expired") {
-        setError(
-          "OTP expired. Please request a new OTP."
+
+        await sendOTP(phone);
+
+        setCode("");
+
+        setResendCooldown(
+          RESEND_COOLDOWN
         );
-      } else if (err?.code === "firestore/permission-denied") {
-        setError(
-          "Unable to check your account. Please try again."
+
+        console.log(
+          "OTP resent successfully"
         );
-      } else {
-        setError(
-          err?.message ||
-            "Unable to verify OTP. Please try again."
+
+        // Focus input again
+        setTimeout(() => {
+          inputRef.current?.focus();
+        }, 150);
+      } catch (err: any) {
+        console.error(
+          "RESEND OTP ERROR:",
+          err
         );
+
+        if (
+          err?.code ===
+          "auth/too-many-requests"
+        ) {
+          setError(
+            "Too many attempts. Please try again later."
+          );
+        } else {
+          setError(
+            err?.message ||
+              "Unable to resend OTP. Please try again."
+          );
+        }
+      } finally {
+        setResending(false);
       }
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleResend = async () => {
-    try {
-      setError("");
-
-      if (!phone) {
-        setError("Phone number is missing.");
-        return;
-      }
-
-      setResending(true);
-
-      await sendOTP(phone);
-
-      setCode("");
-
-      console.log("OTP resent successfully");
-    } catch (err: any) {
-      console.error("RESEND OTP ERROR:", err);
-
-      setError(
-        err?.message ||
-          "Unable to resend OTP. Please try again."
-      );
-    } finally {
-      setResending(false);
-    }
-  };
+    }, [
+      phone,
+      resendCooldown,
+      resending,
+      loading,
+    ]);
 
   return (
     <KeyboardAvoidingView
@@ -175,23 +506,37 @@ export default function OTPScreen() {
       }
     >
       <View style={styles.container}>
-        {/* Back */}
+
+        {/* ------------------------------------------ */}
+        {/* BACK */}
+        {/* ------------------------------------------ */}
+
         <TouchableOpacity
           style={styles.backButton}
           onPress={() => router.back()}
-          disabled={loading || resending}
+          disabled={
+            loading || resending
+          }
         >
-          <Text style={styles.backArrow}>‹</Text>
+          <Text style={styles.backArrow}>
+            ‹
+          </Text>
 
           <Text style={styles.backText}>
             Back
           </Text>
         </TouchableOpacity>
 
-        {/* Header */}
+        {/* ------------------------------------------ */}
+        {/* HEADER */}
+        {/* ------------------------------------------ */}
+
         <View style={styles.header}>
+
           <View style={styles.logo}>
-            <Text style={styles.logoText}>H</Text>
+            <Text style={styles.logoText}>
+              H
+            </Text>
           </View>
 
           <Text style={styles.title}>
@@ -205,37 +550,58 @@ export default function OTPScreen() {
           <Text style={styles.phone}>
             {phone}
           </Text>
+
         </View>
 
-        {/* OTP Input */}
+        {/* ------------------------------------------ */}
+        {/* OTP LABEL */}
+        {/* ------------------------------------------ */}
+
         <Text style={styles.label}>
           OTP
         </Text>
 
+        {/* ------------------------------------------ */}
+        {/* OTP INPUT */}
+        {/* ------------------------------------------ */}
+
         <TextInput
+          ref={inputRef}
           value={code}
-          onChangeText={(text) => {
-            setError("");
-
-            const numbersOnly =
-              text.replace(/\D/g, "");
-
-            setCode(
-              numbersOnly.slice(0, 6)
-            );
-          }}
+          onChangeText={handleCodeChange}
           placeholder="Enter OTP"
           placeholderTextColor="#9CA3AF"
           keyboardType="number-pad"
+
+          /*
+           * Android / iOS OTP autofill hints
+           */
           textContentType="oneTimeCode"
           autoComplete="sms-otp"
+
+          importantForAutofill="yes"
+
           maxLength={6}
+
+          autoFocus
+
           style={[
             styles.otpInput,
-            error && styles.errorInput,
+            error &&
+              styles.errorInput,
           ]}
-          editable={!loading && !resending}
+
+          editable={
+            !loading &&
+            !resending
+          }
+
+          selectTextOnFocus
         />
+
+        {/* ------------------------------------------ */}
+        {/* ERROR */}
+        {/* ------------------------------------------ */}
 
         {error ? (
           <Text style={styles.errorText}>
@@ -243,16 +609,23 @@ export default function OTPScreen() {
           </Text>
         ) : null}
 
-        {/* Verify Button */}
+        {/* ------------------------------------------ */}
+        {/* VERIFY */}
+        {/* ------------------------------------------ */}
+
         <TouchableOpacity
           style={[
             styles.verifyButton,
-            (code.length !== 6 ||
+            (
+              code.length !== 6 ||
               loading ||
-              resending) &&
+              resending
+            ) &&
               styles.disabledButton,
           ]}
-          onPress={handleVerify}
+          onPress={() =>
+            handleVerify()
+          }
           disabled={
             code.length !== 6 ||
             loading ||
@@ -261,7 +634,9 @@ export default function OTPScreen() {
           activeOpacity={0.85}
         >
           {loading ? (
-            <ActivityIndicator color="#FFFFFF" />
+            <ActivityIndicator
+              color="#FFFFFF"
+            />
           ) : (
             <Text style={styles.verifyText}>
               Verify OTP
@@ -269,14 +644,31 @@ export default function OTPScreen() {
           )}
         </TouchableOpacity>
 
-        {/* Resend */}
+        {/* ------------------------------------------ */}
+        {/* RESEND */}
+        {/* ------------------------------------------ */}
+
         <TouchableOpacity
           style={styles.resendButton}
           onPress={handleResend}
-          disabled={loading || resending}
+          disabled={
+            loading ||
+            resending ||
+            resendCooldown > 0
+          }
+          activeOpacity={0.8}
         >
           {resending ? (
-            <ActivityIndicator />
+            <ActivityIndicator
+              color="#2563EB"
+            />
+          ) : resendCooldown > 0 ? (
+            <Text
+              style={styles.resendDisabledText}
+            >
+              Resend OTP in{" "}
+              {resendCooldown}s
+            </Text>
           ) : (
             <Text style={styles.resendText}>
               Resend OTP
@@ -284,7 +676,10 @@ export default function OTPScreen() {
           )}
         </TouchableOpacity>
 
-        {/* Role */}
+        {/* ------------------------------------------ */}
+        {/* ROLE */}
+        {/* ------------------------------------------ */}
+
         <Text style={styles.roleText}>
           Signing in as{" "}
           <Text style={styles.roleBold}>
@@ -293,6 +688,7 @@ export default function OTPScreen() {
               : "Customer"}
           </Text>
         </Text>
+
       </View>
     </KeyboardAvoidingView>
   );
@@ -425,13 +821,21 @@ const styles = StyleSheet.create({
 
   resendButton: {
     marginTop: 22,
+    minHeight: 24,
     alignItems: "center",
+    justifyContent: "center",
   },
 
   resendText: {
     fontSize: 15,
     fontWeight: "700",
     color: "#2563EB",
+  },
+
+  resendDisabledText: {
+    fontSize: 15,
+    fontWeight: "600",
+    color: "#94A3B8",
   },
 
   roleText: {

@@ -20,12 +20,14 @@ export const createMaidProfile = async ({
   phoneNumber,
   serviceCategories,
   serviceArea,
+  profilePhotoUri,
   idProofUri,
 }: {
   name: string;
   phoneNumber: string;
   serviceCategories: string[];
   serviceArea: string;
+  profilePhotoUri: string;
   idProofUri: string;
 }) => {
   const user = auth.currentUser;
@@ -36,34 +38,66 @@ export const createMaidProfile = async ({
 
   const uid = user.uid;
 
-  const fileName = `id-proof-${Date.now()}.jpg`;
+  // -----------------------------
+  // Upload Profile Photo
+  // -----------------------------
 
-  const storageRef = ref(
+  const profilePhotoRef = ref(
     storage,
-    `maid-id-proofs/${uid}/${fileName}`
+    `maid-profile-photos/${uid}/profile-photo.jpg`
   );
 
-  await putFile(storageRef, idProofUri);
+  await putFile(profilePhotoRef, profilePhotoUri);
 
-  const idProofUrl = await getDownloadURL(storageRef);
+  const profilePhotoUrl =
+    await getDownloadURL(profilePhotoRef);
+
+  // -----------------------------
+  // Upload ID Proof
+  // -----------------------------
+
+  const idProofFileName =
+    `id-proof-${Date.now()}.jpg`;
+
+  const idProofRef = ref(
+    storage,
+    `maid-id-proofs/${uid}/${idProofFileName}`
+  );
+
+  await putFile(idProofRef, idProofUri);
+
+  const idProofUrl =
+    await getDownloadURL(idProofRef);
+
+  // -----------------------------
+  // Create Maid Profile
+  // -----------------------------
 
   await setDoc(doc(db, "maids", uid), {
     maidId: uid,
     role: "maid",
     phoneNumber,
     name,
+
+    photoUrl: profilePhotoUrl,
     idProofUrl,
+
     verificationStatus: "pending",
+
     serviceCategories,
     serviceArea,
+
     isAvailableNow: false,
     availabilitySlots: [],
+
     lastAssignedAt: null,
+
     createdAt: new Date(),
   });
 
   return {
     uid,
+    profilePhotoUrl,
     idProofUrl,
   };
 };

@@ -50,17 +50,24 @@ export default function MaidProfileScreen() {
 
   const [name, setName] = useState("");
   const [serviceArea, setServiceArea] = useState("");
+
   const [selectedCategories, setSelectedCategories] =
     useState<string[]>([]);
 
-  const [idProofUri, setIdProofUri] = useState<string | null>(
-    null
-  );
+  const [profilePhotoUri, setProfilePhotoUri] =
+    useState<string | null>(null);
+
+  const [idProofUri, setIdProofUri] =
+    useState<string | null>(null);
 
   const [uploadingImage, setUploadingImage] =
     useState(false);
 
   const [saving, setSaving] = useState(false);
+
+  // ----------------------------------------
+  // Toggle Services
+  // ----------------------------------------
 
   const toggleCategory = (categoryId: string) => {
     setSelectedCategories((current) => {
@@ -73,6 +80,140 @@ export default function MaidProfileScreen() {
       return [...current, categoryId];
     });
   };
+
+  // ----------------------------------------
+  // Profile Photo - Gallery
+  // ----------------------------------------
+
+  const handlePickProfilePhoto = async () => {
+    try {
+      setUploadingImage(true);
+
+      const permission =
+        await ImagePicker.requestMediaLibraryPermissionsAsync();
+
+      if (!permission.granted) {
+        Alert.alert(
+          "Permission Required",
+          "Please allow photo library access to upload your profile photo."
+        );
+        return;
+      }
+
+      const result =
+        await ImagePicker.launchImageLibraryAsync({
+          mediaTypes: ["images"],
+          allowsEditing: true,
+          aspect: [1, 1],
+          quality: 0.8,
+        });
+
+      if (result.canceled) {
+        return;
+      }
+
+      const selectedAsset = result.assets[0];
+
+      if (!selectedAsset?.uri) {
+        return;
+      }
+
+      setProfilePhotoUri(selectedAsset.uri);
+    } catch (error) {
+      console.error(
+        "PROFILE PHOTO PICK ERROR:",
+        error
+      );
+
+      Alert.alert(
+        "Unable to select image",
+        "Please try again."
+      );
+    } finally {
+      setUploadingImage(false);
+    }
+  };
+
+  // ----------------------------------------
+  // Profile Photo - Camera
+  // ----------------------------------------
+
+  const handleTakeProfilePhoto = async () => {
+    try {
+      setUploadingImage(true);
+
+      const permission =
+        await ImagePicker.requestCameraPermissionsAsync();
+
+      if (!permission.granted) {
+        Alert.alert(
+          "Permission Required",
+          "Please allow camera access to take your profile photo."
+        );
+        return;
+      }
+
+      const result =
+        await ImagePicker.launchCameraAsync({
+          allowsEditing: true,
+          aspect: [1, 1],
+          quality: 0.8,
+        });
+
+      if (result.canceled) {
+        return;
+      }
+
+      const selectedAsset = result.assets[0];
+
+      if (!selectedAsset?.uri) {
+        return;
+      }
+
+      setProfilePhotoUri(selectedAsset.uri);
+    } catch (error) {
+      console.error(
+        "PROFILE PHOTO CAMERA ERROR:",
+        error
+      );
+
+      Alert.alert(
+        "Unable to take photo",
+        "Please try again."
+      );
+    } finally {
+      setUploadingImage(false);
+    }
+  };
+
+  // ----------------------------------------
+  // Profile Photo - Choose Camera/Gallery
+  // ----------------------------------------
+
+  const handleProfilePhotoUpload = () => {
+    Alert.alert(
+      "Add Profile Photo",
+      "Choose how you want to add your profile photo.",
+      [
+        {
+          text: "Camera",
+          onPress: handleTakeProfilePhoto,
+        },
+        {
+          text: "Gallery",
+          onPress: handlePickProfilePhoto,
+        },
+        {
+          text: "Cancel",
+          style: "cancel",
+        },
+      ]
+    );
+  };
+
+  // ----------------------------------------
+  // ID Proof - Gallery
+  // ----------------------------------------
 
   const handlePickIdProof = async () => {
     try {
@@ -109,7 +250,10 @@ export default function MaidProfileScreen() {
 
       setIdProofUri(selectedAsset.uri);
     } catch (error) {
-      console.error("ID PROOF PICK ERROR:", error);
+      console.error(
+        "ID PROOF PICK ERROR:",
+        error
+      );
 
       Alert.alert(
         "Unable to select image",
@@ -119,6 +263,10 @@ export default function MaidProfileScreen() {
       setUploadingImage(false);
     }
   };
+
+  // ----------------------------------------
+  // ID Proof - Camera
+  // ----------------------------------------
 
   const handleTakePhoto = async () => {
     try {
@@ -154,7 +302,10 @@ export default function MaidProfileScreen() {
 
       setIdProofUri(selectedAsset.uri);
     } catch (error) {
-      console.error("ID PROOF CAMERA ERROR:", error);
+      console.error(
+        "ID PROOF CAMERA ERROR:",
+        error
+      );
 
       Alert.alert(
         "Unable to take photo",
@@ -164,6 +315,10 @@ export default function MaidProfileScreen() {
       setUploadingImage(false);
     }
   };
+
+  // ----------------------------------------
+  // ID Proof - Choose Camera/Gallery
+  // ----------------------------------------
 
   const handleIdProofUpload = () => {
     Alert.alert(
@@ -186,8 +341,13 @@ export default function MaidProfileScreen() {
     );
   };
 
+  // ----------------------------------------
+  // Submit Profile
+  // ----------------------------------------
+
   const handleSubmit = async () => {
     try {
+      // Name validation
       if (name.trim().length < 2) {
         Alert.alert(
           "Name Required",
@@ -196,6 +356,16 @@ export default function MaidProfileScreen() {
         return;
       }
 
+      // Profile photo validation
+      if (!profilePhotoUri) {
+        Alert.alert(
+          "Profile Photo Required",
+          "Please add your profile photo."
+        );
+        return;
+      }
+
+      // ID proof validation
       if (!idProofUri) {
         Alert.alert(
           "ID Proof Required",
@@ -204,6 +374,7 @@ export default function MaidProfileScreen() {
         return;
       }
 
+      // Services validation
       if (selectedCategories.length === 0) {
         Alert.alert(
           "Select Services",
@@ -212,6 +383,7 @@ export default function MaidProfileScreen() {
         return;
       }
 
+      // Service area validation
       if (serviceArea.trim().length < 2) {
         Alert.alert(
           "Service Area Required",
@@ -220,11 +392,13 @@ export default function MaidProfileScreen() {
         return;
       }
 
+      // Phone validation
       if (!phone) {
         Alert.alert(
           "Phone Number Missing",
           "Please login again."
         );
+
         router.replace("/auth/login");
         return;
       }
@@ -236,6 +410,7 @@ export default function MaidProfileScreen() {
         phoneNumber: phone,
         serviceCategories: selectedCategories,
         serviceArea: serviceArea.trim(),
+        profilePhotoUri,
         idProofUri,
       });
 
@@ -267,28 +442,43 @@ export default function MaidProfileScreen() {
     }
   };
 
+  // ----------------------------------------
+  // Sign Out
+  // ----------------------------------------
 
   const handleSignOut = async () => {
-  try {
-    const currentUser = auth.currentUser;
+    try {
+      const currentUser = auth.currentUser;
 
-    if (currentUser) {
-      await signOut(auth);
+      if (currentUser) {
+        await signOut(auth);
+      }
+
+      router.replace("/");
+    } catch (error) {
+      console.error(
+        "MAID SIGN OUT ERROR:",
+        error
+      );
+
+      router.replace("/");
     }
+  };
 
-    router.replace("/");
-  } catch (error) {
-    console.error("MAID SIGN OUT ERROR:", error);
-
-    router.replace("/");
-  }
-};
+  // ----------------------------------------
+  // Form Validation
+  // ----------------------------------------
 
   const isValid =
     name.trim().length >= 2 &&
+    profilePhotoUri !== null &&
     idProofUri !== null &&
     selectedCategories.length > 0 &&
     serviceArea.trim().length >= 2;
+
+  // ----------------------------------------
+  // UI
+  // ----------------------------------------
 
   return (
     <KeyboardAvoidingView
@@ -305,6 +495,7 @@ export default function MaidProfileScreen() {
         showsVerticalScrollIndicator={false}
       >
         {/* Header */}
+
         <Text style={styles.title}>
           Set up your helper profile
         </Text>
@@ -315,6 +506,7 @@ export default function MaidProfileScreen() {
         </Text>
 
         {/* Phone */}
+
         {phone ? (
           <View style={styles.phoneCard}>
             <Text style={styles.phoneLabel}>
@@ -328,6 +520,7 @@ export default function MaidProfileScreen() {
         ) : null}
 
         {/* Name */}
+
         <Text style={styles.label}>
           Your name *
         </Text>
@@ -342,7 +535,74 @@ export default function MaidProfileScreen() {
           editable={!saving}
         />
 
+        {/* Profile Photo */}
+
+        <Text style={styles.label}>
+          Profile photo *
+        </Text>
+
+        <TouchableOpacity
+          style={styles.profilePhotoCard}
+          onPress={handleProfilePhotoUpload}
+          disabled={uploadingImage || saving}
+          activeOpacity={0.8}
+        >
+          {profilePhotoUri ? (
+            <View style={styles.profilePhotoPreview}>
+              <Image
+                source={{ uri: profilePhotoUri }}
+                style={styles.profilePhotoImage}
+              />
+
+              <View style={styles.profilePhotoContent}>
+                <Text style={styles.profilePhotoTitle}>
+                  Profile photo added
+                </Text>
+
+                <Text style={styles.profilePhotoSubtitle}>
+                  Tap to replace photo
+                </Text>
+              </View>
+
+              <Text style={styles.changeText}>
+                Change
+              </Text>
+            </View>
+          ) : uploadingImage ? (
+            <View style={styles.loadingUpload}>
+              <ActivityIndicator size="small" />
+
+              <Text style={styles.uploadLoadingText}>
+                Opening...
+              </Text>
+            </View>
+          ) : (
+            <View style={styles.uploadContent}>
+              <View style={styles.uploadIcon}>
+                <Text style={styles.uploadIconText}>
+                  +
+                </Text>
+              </View>
+
+              <View style={styles.uploadText}>
+                <Text style={styles.uploadTitle}>
+                  Add profile photo
+                </Text>
+
+                <Text style={styles.uploadSubtitle}>
+                  Use a clear photo of yourself
+                </Text>
+              </View>
+
+              <Text style={styles.chevron}>
+                ›
+              </Text>
+            </View>
+          )}
+        </TouchableOpacity>
+
         {/* ID Proof */}
+
         <Text style={styles.label}>
           ID proof *
         </Text>
@@ -410,6 +670,7 @@ export default function MaidProfileScreen() {
         </TouchableOpacity>
 
         {/* Services */}
+
         <Text style={styles.label}>
           Services you provide *
         </Text>
@@ -473,6 +734,7 @@ export default function MaidProfileScreen() {
         </View>
 
         {/* Service Area */}
+
         <Text style={styles.label}>
           Service area *
         </Text>
@@ -492,7 +754,8 @@ export default function MaidProfileScreen() {
           bookings.
         </Text>
 
-        {/* Verification info */}
+        {/* Verification Info */}
+
         <View style={styles.infoCard}>
           <View style={styles.infoIcon}>
             <Text style={styles.infoIconText}>
@@ -513,6 +776,7 @@ export default function MaidProfileScreen() {
         </View>
 
         {/* Submit */}
+
         <TouchableOpacity
           style={[
             styles.submitButton,
@@ -538,15 +802,19 @@ export default function MaidProfileScreen() {
           )}
         </TouchableOpacity>
 
-
         {/* Sign Out */}
+
         <TouchableOpacity
           style={styles.logoutButton}
           onPress={handleSignOut}
-          disabled={saving || uploadingImage}
+          disabled={
+            saving || uploadingImage
+          }
           activeOpacity={0.85}
         >
-          <Text style={styles.logoutText}>Sign Out</Text>
+          <Text style={styles.logoutText}>
+            Sign Out
+          </Text>
         </TouchableOpacity>
 
         <Text style={styles.footer}>
@@ -557,6 +825,10 @@ export default function MaidProfileScreen() {
     </KeyboardAvoidingView>
   );
 }
+
+// ========================================
+// Styles
+// ========================================
 
 const styles = StyleSheet.create({
   screen: {
@@ -623,6 +895,54 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: "#111827",
   },
+
+  // ----------------------------------------
+  // Profile Photo
+  // ----------------------------------------
+
+  profilePhotoCard: {
+    minHeight: 88,
+    marginBottom: 25,
+    padding: 14,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#CBD5E1",
+    backgroundColor: "#FFFFFF",
+    justifyContent: "center",
+  },
+
+  profilePhotoPreview: {
+    minHeight: 70,
+    flexDirection: "row",
+    alignItems: "center",
+  },
+
+  profilePhotoImage: {
+    width: 70,
+    height: 70,
+    borderRadius: 35,
+  },
+
+  profilePhotoContent: {
+    flex: 1,
+    marginLeft: 12,
+  },
+
+  profilePhotoTitle: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: "#166534",
+  },
+
+  profilePhotoSubtitle: {
+    marginTop: 4,
+    fontSize: 12,
+    color: "#64748B",
+  },
+
+  // ----------------------------------------
+  // ID Proof
+  // ----------------------------------------
 
   uploadCard: {
     minHeight: 88,
@@ -724,6 +1044,10 @@ const styles = StyleSheet.create({
     color: "#2563EB",
   },
 
+  // ----------------------------------------
+  // Services
+  // ----------------------------------------
+
   helperText: {
     marginTop: -2,
     marginBottom: 12,
@@ -790,6 +1114,10 @@ const styles = StyleSheet.create({
     color: "#FFFFFF",
   },
 
+  // ----------------------------------------
+  // Service Area
+  // ----------------------------------------
+
   areaHint: {
     marginTop: -12,
     marginBottom: 24,
@@ -797,6 +1125,10 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     color: "#64748B",
   },
+
+  // ----------------------------------------
+  // Verification Info
+  // ----------------------------------------
 
   infoCard: {
     padding: 14,
@@ -838,6 +1170,10 @@ const styles = StyleSheet.create({
     color: "#1D4ED8",
   },
 
+  // ----------------------------------------
+  // Submit
+  // ----------------------------------------
+
   submitButton: {
     height: 56,
     marginTop: 24,
@@ -869,6 +1205,9 @@ const styles = StyleSheet.create({
     color: "#FFFFFF",
   },
 
+  // ----------------------------------------
+  // Sign Out
+  // ----------------------------------------
 
   logoutButton: {
     height: 52,
