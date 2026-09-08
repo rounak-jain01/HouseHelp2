@@ -3,6 +3,8 @@ import {
   onDocumentCreated,
   onDocumentUpdated,
 } from "firebase-functions/v2/firestore";
+import { onCall, HttpsError } from "firebase-functions/v2/https";
+
 import { getMessaging } from "firebase-admin/messaging";
 import { initializeApp } from "firebase-admin/app";
 import { getFirestore, FieldValue, Timestamp } from "firebase-admin/firestore";
@@ -36,10 +38,12 @@ type AvailabilityOverride = "manual_off" | "manual_on" | null;
 
 type AvailabilitySlot = {
   id: string;
-  date: string; // YYYY-MM-DD
-  startTime: string; // HH:mm
-  endTime: string; // HH:mm
+  date: string;
+  startTime: string;
+  endTime: string;
 };
+
+type MaidResponse = "accepted" | "rejected" | "timeout";
 
 type Booking = {
   customerId?: string;
@@ -65,6 +69,52 @@ type Booking = {
   totalPrice?: number;
 
   createdAt?: Timestamp;
+
+  /*
+   * All maids who received this booking request.
+   */
+  offeredMaidIds?: string[];
+
+  /*
+   * Individual maid responses.
+   *
+   * Example:
+   *
+   * {
+   *   "maidA": "rejected",
+   *   "maidB": "accepted"
+   * }
+   */
+  maidResponses?: Record<string, MaidResponse>;
+
+  /*
+   * Maid who finally won the booking.
+   */
+  winningMaidId?: string | null;
+
+  assignedAt?: Timestamp;
+
+  respondedAt?: Timestamp;
+
+  updatedAt?: Timestamp;
+
+  assignmentError?: string;
+
+  cancellationReason?: string;
+
+  cancelledBy?: string;
+
+  startedAt?: Timestamp;
+
+  completedAt?: Timestamp;
+
+  travelStartedAt?: Timestamp;
+
+  maidCurrentLocation?: {
+    latitude?: number;
+    longitude?: number;
+    updatedAt?: Timestamp | null;
+  };
 };
 
 type Maid = {
@@ -89,11 +139,9 @@ type Maid = {
   /*
    * manual_off
    *    Maid intentionally turned availability OFF.
-   *    Backend must reject new assignments.
    *
    * manual_on
-   *    Maid intentionally turned availability ON outside
-   *    scheduled availability.
+   *    Maid intentionally turned availability ON.
    *
    * null
    *    Follow automatic scheduled availability.
@@ -109,7 +157,6 @@ type Maid = {
 };
 
 type NotificationType =
-  | "booking_created"
   | "booking_assigned"
   | "booking_confirmed"
   | "booking_started"
@@ -126,14 +173,20 @@ type NotificationPayload = {
   bookingId: string;
 };
 
+/* =========================================================
+   NOTIFICATIONS
+========================================================= */
+
 async function createNotification(payload: NotificationPayload): Promise<void> {
   const { recipientId, recipientRole, type, title, body, bookingId } = payload;
 
   const collectionName = recipientRole === "customer" ? "users" : "maids";
 
-  // -------------------------------------------------------
-  // 1. CREATE IN-APP NOTIFICATION
-  // -------------------------------------------------------
+  /*
+   * -------------------------------------------------------
+   * 1. CREATE IN-APP NOTIFICATION
+   * -------------------------------------------------------
+   */
 
   const notificationRef = db
     .collection(collectionName)
@@ -150,9 +203,11 @@ async function createNotification(payload: NotificationPayload): Promise<void> {
     createdAt: FieldValue.serverTimestamp(),
   });
 
-  // -------------------------------------------------------
-  // 2. GET FCM TOKENS
-  // -------------------------------------------------------
+  /*
+   * -------------------------------------------------------
+   * 2. GET FCM TOKENS
+   * -------------------------------------------------------
+   */
 
   const recipientSnapshot = await db
     .collection(collectionName)
@@ -161,6 +216,7 @@ async function createNotification(payload: NotificationPayload): Promise<void> {
 
   if (!recipientSnapshot.exists) {
     console.log(`Recipient ${recipientId} not found`);
+
     return;
   }
 
@@ -172,45 +228,44 @@ async function createNotification(payload: NotificationPayload): Promise<void> {
 
   if (tokens.length === 0) {
     console.log(`No FCM tokens found for ${recipientRole}: ${recipientId}`);
+
     return;
   }
 
-  // -------------------------------------------------------
-  // 3. SEND PUSH NOTIFICATION
-  // -------------------------------------------------------
+  /*
+   * -------------------------------------------------------
+   * 3. SEND PUSH NOTIFICATION
+   * -------------------------------------------------------
+   */
 
   try {
     const response = await messaging.sendEachForMulticast({
       tokens,
+
       notification: {
         title,
         body,
       },
+
       data: {
         type,
         bookingId,
       },
     });
 
-    console.log(`FCM RESULT for ${recipientRole} ${recipientId}:`, {
+    console.log(`Push notification sent to ${recipientRole} ${recipientId}`, {
       successCount: response.successCount,
-      failureCount: response.failureCount,
-    });
 
-    response.responses.forEach((result, index) => {
-      if (result.success) {
-        console.log(`FCM TOKEN ${index}: SUCCESS`);
-      } else {
-        console.error(`FCM TOKEN ${index}: FAILED`, {
-          errorCode: result.error?.code,
-          errorMessage: result.error?.message,
-        });
-      }
+      failureCount: response.failureCount,
     });
   } catch (error) {
     console.error(`Failed to send push notification to ${recipientId}:`, error);
   }
 }
+
+/* =========================================================
+   CUSTOMER BOOKING CREATED NOTIFICATION
+========================================================= */
 
 async function sendBookingCreatedNotification(
   bookingId: string,
@@ -218,17 +273,54 @@ async function sendBookingCreatedNotification(
 ): Promise<void> {
   if (!booking.customerId) {
     console.log(`Booking ${bookingId} has no customerId`);
+
     return;
   }
 
   await createNotification({
     recipientId: booking.customerId,
+
     recipientRole: "customer",
+
     type: "booking_assigned",
+
     title: "Booking Request Sent",
+
     body: "Your booking request has been sent. We're finding a suitable helper for you.",
+
     bookingId,
   });
+}
+
+/* =========================================================
+   MAID BOOKING REQUEST NOTIFICATION
+========================================================= */
+
+async function sendBookingRequestToMaid(
+  bookingId: string,
+  maidId: string,
+): Promise<void> {
+  try {
+    await createNotification({
+      recipientId: maidId,
+
+      recipientRole: "maid",
+
+      type: "booking_assigned",
+
+      title: "New Booking Request",
+
+      body: "You have received a new booking request. Accept it if you want to take this job.",
+
+      bookingId,
+    });
+  } catch (error) {
+    /*
+     * One maid's notification failure should NOT stop
+     * notifications from reaching other eligible maids.
+     */
+    console.error(`Failed to send booking request to maid ${maidId}:`, error);
+  }
 }
 
 /* =========================================================
@@ -243,23 +335,26 @@ function getIndiaDateTime(timestamp: Timestamp) {
 
   const formatter = new Intl.DateTimeFormat("en-CA", {
     timeZone: INDIA_TIMEZONE,
+
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
+
     hour: "2-digit",
     minute: "2-digit",
+
     hourCycle: "h23",
   });
 
   const parts = formatter.formatToParts(date);
 
-  const getPart = (type: string) => {
-    return parts.find((part) => part.type === type)?.value ?? "";
-  };
+  const getPart = (type: string) =>
+    parts.find((part) => part.type === type)?.value ?? "";
 
   return {
-    date: `${getPart("year")}-${getPart("month")}-${getPart("day")}`,
-    time: `${getPart("hour")}:${getPart("minute")}`,
+    date: `${getPart("year")}-` + `${getPart("month")}-` + `${getPart("day")}`,
+
+    time: `${getPart("hour")}:` + `${getPart("minute")}`,
   };
 }
 
@@ -273,7 +368,7 @@ function timeToMinutes(time: string): number {
 }
 
 /**
- * Returns booking start + end in India timezone.
+ * Returns booking start + end.
  */
 function getBookingTimeRange(booking: Booking) {
   if (!booking.scheduledDateTime) {
@@ -299,9 +394,11 @@ function getBookingTimeRange(booking: Booking) {
     end,
 
     startDate: startIndia.date,
+
     startTime: startIndia.time,
 
     endDate: endIndia.date,
+
     endTime: endIndia.time,
   };
 }
@@ -311,23 +408,8 @@ function getBookingTimeRange(booking: Booking) {
 ========================================================= */
 
 /**
- * Checks whether the booking time falls completely inside
- * one scheduled availability slot.
- *
- * Example:
- *
- * Slot:
- * 16:00 - 20:00
- *
- * Booking:
- * 17:00 - 19:00
- *
- * => true
- *
- * Booking:
- * 19:00 - 21:00
- *
- * => false
+ * Checks whether booking fits completely
+ * inside a scheduled availability slot.
  */
 function isInsideAvailabilitySlot(
   booking: Booking,
@@ -340,45 +422,34 @@ function isInsideAvailabilitySlot(
   }
 
   /*
-   * Booking must start and finish on the same slot date.
+   * Booking must start and finish
+   * on the same slot date.
    */
   if (range.startDate !== slot.date || range.endDate !== slot.date) {
     return false;
   }
 
   const bookingStart = timeToMinutes(range.startTime);
+
   const bookingEnd = timeToMinutes(range.endTime);
 
   const slotStart = timeToMinutes(slot.startTime);
+
   const slotEnd = timeToMinutes(slot.endTime);
 
   return bookingStart >= slotStart && bookingEnd <= slotEnd;
 }
 
 /**
- * Determines whether a maid is available for a booking.
- *
- * IMPORTANT:
- *
- * manual_off ALWAYS wins.
- *
- * This means:
- *
- * Scheduled slot active
- * +
- * Maid manually OFF
- * =
- * unavailable
+ * Determines whether maid is available.
  */
 function isMaidAvailable(maid: Maid, booking: Booking): boolean {
   /*
    * -------------------------------------------------------
-   * 1. MANUAL OFF HAS HIGHEST PRIORITY
+   * 1. MANUAL OFF
    * -------------------------------------------------------
-   *
-   * If maid intentionally switched OFF,
-   * backend must not assign any new booking.
    */
+
   if (maid.availabilityOverride === "manual_off") {
     return false;
   }
@@ -387,19 +458,15 @@ function isMaidAvailable(maid: Maid, booking: Booking): boolean {
    * -------------------------------------------------------
    * 2. MANUAL ON
    * -------------------------------------------------------
-   *
-   * If maid intentionally switched ON,
-   * allow availability for assignment.
-   *
-   * We still allow booking conflict check separately.
    */
+
   if (maid.availabilityOverride === "manual_on") {
     return true;
   }
 
   /*
    * -------------------------------------------------------
-   * 3. Validate booking time
+   * 3. VALIDATE BOOKING TIME
    * -------------------------------------------------------
    */
 
@@ -414,7 +481,7 @@ function isMaidAvailable(maid: Maid, booking: Booking): boolean {
   const now = new Date();
 
   /*
-   * Past bookings should never be assigned.
+   * Past bookings should never be offered.
    */
   if (bookingStart.getTime() <= now.getTime()) {
     return false;
@@ -422,11 +489,8 @@ function isMaidAvailable(maid: Maid, booking: Booking): boolean {
 
   /*
    * -------------------------------------------------------
-   * 4. Scheduled availability
+   * 4. SCHEDULED AVAILABILITY
    * -------------------------------------------------------
-   *
-   * For bookings that have a matching availability slot,
-   * the slot itself determines availability.
    */
 
   const slots = maid.availabilitySlots ?? [];
@@ -441,11 +505,8 @@ function isMaidAvailable(maid: Maid, booking: Booking): boolean {
 
   /*
    * -------------------------------------------------------
-   * 5. Near-time booking
+   * 5. NEAR-TIME BOOKING
    * -------------------------------------------------------
-   *
-   * If booking is within 4 hours and there is no scheduled
-   * slot, use isAvailableNow.
    */
 
   const differenceMs = bookingStart.getTime() - now.getTime();
@@ -458,11 +519,10 @@ function isMaidAvailable(maid: Maid, booking: Booking): boolean {
 
   /*
    * -------------------------------------------------------
-   * 6. Advance booking without matching slot
+   * 6. ADVANCE BOOKING WITHOUT SLOT
    * -------------------------------------------------------
-   *
-   * No scheduled availability => unavailable.
    */
+
   return false;
 }
 
@@ -471,14 +531,8 @@ function isMaidAvailable(maid: Maid, booking: Booking): boolean {
 ========================================================= */
 
 /**
- * Checks whether maid already has another active booking
- * overlapping the requested booking.
- *
- * Blocked statuses:
- *
- * assigned
- * confirmed
- * in_progress
+ * Checks whether maid already has another active
+ * booking overlapping the requested booking.
  */
 async function hasBookingConflict(
   maidId: string,
@@ -495,17 +549,14 @@ async function hasBookingConflict(
     .where("maidId", "==", maidId)
     .get();
 
+  const activeStatuses: BookingStatus[] = [
+    "assigned",
+    "confirmed",
+    "in_progress",
+  ];
+
   for (const bookingDoc of snapshot.docs) {
     const existingBooking = bookingDoc.data() as Booking;
-
-    /*
-     * Only active bookings create conflicts.
-     */
-    const activeStatuses: BookingStatus[] = [
-      "assigned",
-      "confirmed",
-      "in_progress",
-    ];
 
     if (!activeStatuses.includes(existingBooking.status as BookingStatus)) {
       continue;
@@ -522,7 +573,7 @@ async function hasBookingConflict(
     }
 
     /*
-     * Standard time overlap check:
+     * Standard overlap:
      *
      * requested start < existing end
      * AND
@@ -544,19 +595,6 @@ async function hasBookingConflict(
    CATEGORY MATCHING
 ========================================================= */
 
-/**
- * Booking must contain all categories required by customer.
- *
- * Example:
- *
- * Booking:
- * ["cleaning", "cooking"]
- *
- * Maid:
- * ["cleaning", "cooking", "laundry"]
- *
- * => true
- */
 function maidMatchesCategories(maid: Maid, booking: Booking): boolean {
   const requestedCategories = booking.categories ?? [];
 
@@ -566,37 +604,106 @@ function maidMatchesCategories(maid: Maid, booking: Booking): boolean {
     return false;
   }
 
+  /*
+   * Maid must support ALL requested
+   * services.
+   */
   return requestedCategories.every((category) =>
     maidCategories.includes(category),
   );
 }
 
 /* =========================================================
-   ROUND ROBIN SORT
+   FIND ELIGIBLE MAIDS
 ========================================================= */
 
-/**
- * Oldest lastAssignedAt gets priority.
- *
- * Maid never assigned before:
- * lastAssignedAt = null
- *
- * Such maid gets highest priority.
- */
-function sortByLastAssignedAt(maids: Maid[]): Maid[] {
-  return [...maids].sort((a, b) => {
-    const aTime = a.lastAssignedAt?.toMillis?.() ?? 0;
+async function findEligibleMaids(booking: Booking): Promise<Maid[]> {
+  const maidSnapshot = await db.collection("maids").get();
 
-    const bTime = b.lastAssignedAt?.toMillis?.() ?? 0;
+  console.log(`Total maids found: ${maidSnapshot.size}`);
 
-    return aTime - bTime;
-  });
+  const eligibleMaids: Maid[] = [];
+
+  for (const maidDoc of maidSnapshot.docs) {
+    const maidData = maidDoc.data() as Maid;
+
+    const maid: Maid = {
+      ...maidData,
+      maidId: maidDoc.id,
+    };
+
+    /*
+     * -----------------------------------------------------
+     * 1. VERIFICATION
+     * -----------------------------------------------------
+     */
+
+    if (maid.verificationStatus !== "verified") {
+      continue;
+    }
+
+    /*
+     * -----------------------------------------------------
+     * 2. CATEGORY MATCH
+     * -----------------------------------------------------
+     */
+
+    if (!maidMatchesCategories(maid, booking)) {
+      continue;
+    }
+
+    /*
+     * -----------------------------------------------------
+     * 3. AVAILABILITY
+     * -----------------------------------------------------
+     */
+
+    const available = isMaidAvailable(maid, booking);
+
+    if (!available) {
+      continue;
+    }
+
+    /*
+     * -----------------------------------------------------
+     * 4. EXISTING BOOKING CONFLICT
+     * -----------------------------------------------------
+     */
+
+    const hasConflict = await hasBookingConflict(maid.maidId, booking);
+
+    if (hasConflict) {
+      console.log(`Maid ${maid.maidId} has booking conflict`);
+
+      continue;
+    }
+
+    /*
+     * -----------------------------------------------------
+     * ELIGIBLE
+     * -----------------------------------------------------
+     */
+
+    eligibleMaids.push(maid);
+  }
+
+  return eligibleMaids;
 }
 
 /* =========================================================
-   ASSIGN MAID
+   ASSIGN / OFFER BOOKING TO ALL MAIDS
 ========================================================= */
 
+/**
+ * IMPORTANT:
+ *
+ * This function NO LONGER assigns one maid.
+ *
+ * It finds ALL eligible maids and sends the request
+ * to every one of them.
+ *
+ * The booking remains "pending" until one maid accepts.
+ */
 export const assignMaid = onDocumentCreated(
   "bookings/{bookingId}",
   async (event) => {
@@ -611,13 +718,15 @@ export const assignMaid = onDocumentCreated(
     }
 
     const booking = bookingSnapshot.data() as Booking;
-
-    console.log("New booking received:", bookingId);
     await sendBookingCreatedNotification(bookingId, booking);
+    console.log("New booking received:", bookingId);
 
     /*
-     * Only pending bookings should be processed.
+     * -------------------------------------------------------
+     * ONLY PENDING BOOKINGS
+     * -------------------------------------------------------
      */
+
     if (booking.status !== "pending") {
       console.log("Booking is not pending. Skipping:", bookingId);
 
@@ -625,14 +734,19 @@ export const assignMaid = onDocumentCreated(
     }
 
     /*
-     * Validate scheduled time.
+     * -------------------------------------------------------
+     * VALIDATE SCHEDULED TIME
+     * -------------------------------------------------------
      */
+
     if (!booking.scheduledDateTime) {
       console.error("Booking has no scheduledDateTime:", bookingId);
 
       await bookingSnapshot.ref.update({
         status: "no_maid_found",
+
         assignmentError: "Missing scheduledDateTime",
+
         updatedAt: FieldValue.serverTimestamp(),
       });
 
@@ -640,14 +754,19 @@ export const assignMaid = onDocumentCreated(
     }
 
     /*
-     * Validate categories.
+     * -------------------------------------------------------
+     * VALIDATE CATEGORIES
+     * -------------------------------------------------------
      */
+
     if (!booking.categories || booking.categories.length === 0) {
       console.error("Booking has no categories:", bookingId);
 
       await bookingSnapshot.ref.update({
         status: "no_maid_found",
+
         assignmentError: "No service categories requested",
+
         updatedAt: FieldValue.serverTimestamp(),
       });
 
@@ -656,89 +775,11 @@ export const assignMaid = onDocumentCreated(
 
     /*
      * -------------------------------------------------------
-     * FETCH ALL MAIDS
+     * FIND ALL ELIGIBLE MAIDS
      * -------------------------------------------------------
      */
 
-    const maidSnapshot = await db.collection("maids").get();
-
-    console.log(`Total maids found: ${maidSnapshot.size}`);
-
-    const eligibleMaids: Maid[] = [];
-
-    /*
-     * -------------------------------------------------------
-     * FILTER MAIDS
-     * -------------------------------------------------------
-     */
-
-    for (const maidDoc of maidSnapshot.docs) {
-      const maidData = maidDoc.data() as Maid;
-
-      const maid: Maid = {
-        ...maidData,
-        maidId: maidDoc.id,
-      };
-
-      /*
-       * -----------------------------------------------------
-       * 1. VERIFICATION
-       * -----------------------------------------------------
-       */
-
-      if (maid.verificationStatus !== "verified") {
-        continue;
-      }
-
-      /*
-       * -----------------------------------------------------
-       * 2. CATEGORY MATCH
-       * -----------------------------------------------------
-       */
-
-      if (!maidMatchesCategories(maid, booking)) {
-        continue;
-      }
-
-      /*
-       * -----------------------------------------------------
-       * 3. AVAILABILITY
-       * -----------------------------------------------------
-       *
-       * IMPORTANT:
-       *
-       * manual_off is checked inside isMaidAvailable()
-       * and always wins over scheduled availability.
-       */
-
-      const available = isMaidAvailable(maid, booking);
-
-      if (!available) {
-        continue;
-      }
-
-      /*
-       * -----------------------------------------------------
-       * 4. EXISTING BOOKING CONFLICT
-       * -----------------------------------------------------
-       */
-
-      const hasConflict = await hasBookingConflict(maid.maidId, booking);
-
-      if (hasConflict) {
-        console.log(`Maid ${maid.maidId} has booking conflict`);
-
-        continue;
-      }
-
-      /*
-       * -----------------------------------------------------
-       * ELIGIBLE
-       * -----------------------------------------------------
-       */
-
-      eligibleMaids.push(maid);
-    }
+    const eligibleMaids = await findEligibleMaids(booking);
 
     /*
      * -------------------------------------------------------
@@ -751,7 +792,11 @@ export const assignMaid = onDocumentCreated(
 
       await bookingSnapshot.ref.update({
         status: "no_maid_found",
+
         maidId: null,
+
+        offeredMaidIds: [],
+
         updatedAt: FieldValue.serverTimestamp(),
       });
 
@@ -760,90 +805,461 @@ export const assignMaid = onDocumentCreated(
 
     /*
      * -------------------------------------------------------
-     * ROUND ROBIN
+     * GET ALL MAID IDS
      * -------------------------------------------------------
      */
 
-    const sortedMaids = sortByLastAssignedAt(eligibleMaids);
+    const offeredMaidIds = eligibleMaids.map((maid) => maid.maidId);
 
-    const selectedMaid = sortedMaids[0];
-
-    console.log("Selected maid:", selectedMaid.maidId);
+    console.log("Eligible maids for booking:", bookingId, offeredMaidIds);
 
     /*
      * -------------------------------------------------------
-     * ATOMIC ASSIGNMENT
+     * SAVE ALL OFFERED MAIDS
      * -------------------------------------------------------
      *
-     * Transaction prevents multiple simultaneous bookings
-     * from assigning the same maid incorrectly.
+     * Booking remains PENDING.
+     *
+     * maidId remains null.
+     *
+     * No maid wins yet.
      */
-    await db.runTransaction(async (transaction) => {
-      const freshBookingSnapshot = await transaction.get(bookingSnapshot.ref);
 
-      if (!freshBookingSnapshot.exists) {
-        throw new Error("Booking no longer exists");
-      }
+    await bookingSnapshot.ref.update({
+      maidId: null,
 
-      const freshBooking = freshBookingSnapshot.data() as Booking;
+      offeredMaidIds,
 
-      /*
-       * Booking may have been cancelled/changed while
-       * assignment was running.
-       */
-      if (freshBooking.status !== "pending") {
-        console.log("Booking changed before assignment:", bookingId);
+      maidResponses: {},
 
-        return;
-      }
+      winningMaidId: null,
 
-      const maidRef = db.collection("maids").doc(selectedMaid.maidId);
-
-      const freshMaidSnapshot = await transaction.get(maidRef);
-
-      if (!freshMaidSnapshot.exists) {
-        throw new Error("Selected maid no longer exists");
-      }
-
-      const freshMaid = freshMaidSnapshot.data() as Maid;
-
-      /*
-       * ---------------------------------------------------
-       * FINAL MANUAL OFF CHECK
-       * ---------------------------------------------------
-       *
-       * This is extremely important.
-       *
-       * Maid could have switched OFF between the first
-       * availability check and transaction.
-       */
-      if (freshMaid.availabilityOverride === "manual_off") {
-        throw new Error("Selected maid manually turned availability OFF");
-      }
-
-      /*
-       * Final conflict check using fresh data.
-       */
-      transaction.update(bookingSnapshot.ref, {
-        status: "assigned",
-        maidId: selectedMaid.maidId,
-        assignedAt: FieldValue.serverTimestamp(),
-        updatedAt: FieldValue.serverTimestamp(),
-      });
-
-      transaction.update(maidRef, {
-        lastAssignedAt: FieldValue.serverTimestamp(),
-      });
+      updatedAt: FieldValue.serverTimestamp(),
     });
 
-    console.log(`Maid ${selectedMaid.maidId} assigned to booking ${bookingId}`);
+    /*
+     * -------------------------------------------------------
+     * SEND REQUEST TO EVERY ELIGIBLE MAID
+     * -------------------------------------------------------
+     *
+     * Promise.allSettled is intentionally used.
+     *
+     * If notification to one maid fails,
+     * other maids still receive their requests.
+     */
+
+    const notificationResults = await Promise.allSettled(
+      offeredMaidIds.map((maidId) =>
+        sendBookingRequestToMaid(bookingId, maidId),
+      ),
+    );
+
+    let successCount = 0;
+    let failureCount = 0;
+
+    for (const result of notificationResults) {
+      if (result.status === "fulfilled") {
+        successCount++;
+      } else {
+        failureCount++;
+      }
+    }
+
+    console.log(
+      `Booking ${bookingId} offered to ${offeredMaidIds.length} maids`,
+      {
+        successCount,
+        failureCount,
+      },
+    );
   },
 );
+
+/* =========================================================
+   ACCEPT BOOKING
+========================================================= */
+
+/**
+ * FIRST ACCEPT WINS
+ *
+ * This is the most important part of the new assignment
+ * architecture.
+ *
+ * Multiple maids can call this function at exactly the
+ * same time.
+ *
+ * Firestore transaction guarantees that only one maid
+ * can successfully change the booking from pending
+ * to confirmed.
+ */
+export const acceptBooking = onCall(async (request) => {
+  /*
+   * -------------------------------------------------------
+   * AUTHENTICATION
+   * -------------------------------------------------------
+   */
+
+  if (!request.auth) {
+    throw new HttpsError("unauthenticated", "You must be logged in as a maid.");
+  }
+
+  const maidId = request.auth.uid;
+
+  /*
+   * -------------------------------------------------------
+   * VALIDATE INPUT
+   * -------------------------------------------------------
+   */
+
+  const bookingId =
+    typeof request.data?.bookingId === "string"
+      ? request.data.bookingId.trim()
+      : "";
+
+  if (!bookingId) {
+    throw new HttpsError("invalid-argument", "bookingId is required.");
+  }
+
+  console.log(`Maid ${maidId} is trying to accept booking ${bookingId}`);
+
+  const bookingRef = db.collection("bookings").doc(bookingId);
+
+  /*
+   * -------------------------------------------------------
+   * TRANSACTION
+   * -------------------------------------------------------
+   */
+
+  let accepted = false;
+
+  await db.runTransaction(async (transaction) => {
+    /*
+     * ALWAYS READ BOOKING FIRST.
+     */
+    const bookingSnapshot = await transaction.get(bookingRef);
+
+    if (!bookingSnapshot.exists) {
+      throw new HttpsError("not-found", "Booking not found.");
+    }
+
+    const booking = bookingSnapshot.data() as Booking;
+
+    /*
+     * ---------------------------------------------------
+     * BOOKING MUST STILL BE PENDING
+     * ---------------------------------------------------
+     */
+
+    if (booking.status !== "pending") {
+      throw new HttpsError(
+        "failed-precondition",
+        "This booking has already been taken or is no longer available.",
+      );
+    }
+
+    /*
+     * ---------------------------------------------------
+     * MAID MUST HAVE RECEIVED THE REQUEST
+     * ---------------------------------------------------
+     */
+
+    const offeredMaidIds = booking.offeredMaidIds ?? [];
+
+    if (!offeredMaidIds.includes(maidId)) {
+      throw new HttpsError(
+        "permission-denied",
+        "You are not eligible for this booking.",
+      );
+    }
+
+    /*
+     * ---------------------------------------------------
+     * GET FRESH MAID DATA
+     * ---------------------------------------------------
+     */
+
+    const maidRef = db.collection("maids").doc(maidId);
+
+    const maidSnapshot = await transaction.get(maidRef);
+
+    if (!maidSnapshot.exists) {
+      throw new HttpsError("not-found", "Maid profile not found.");
+    }
+
+    const maid = {
+      ...(maidSnapshot.data() as Maid),
+      maidId,
+    };
+
+    /*
+     * ---------------------------------------------------
+     * FINAL VERIFICATION CHECK
+     * ---------------------------------------------------
+     */
+
+    if (maid.verificationStatus !== "verified") {
+      throw new HttpsError(
+        "failed-precondition",
+        "Your maid profile is not verified.",
+      );
+    }
+
+    /*
+     * ---------------------------------------------------
+     * FINAL CATEGORY CHECK
+     * ---------------------------------------------------
+     */
+
+    if (!maidMatchesCategories(maid, booking)) {
+      throw new HttpsError(
+        "failed-precondition",
+        "You do not support all requested services.",
+      );
+    }
+
+    /*
+     * ---------------------------------------------------
+     * FINAL AVAILABILITY CHECK
+     * ---------------------------------------------------
+     */
+
+    if (!isMaidAvailable(maid, booking)) {
+      throw new HttpsError(
+        "failed-precondition",
+        "You are no longer available for this booking.",
+      );
+    }
+
+    /*
+     * ---------------------------------------------------
+     * FINAL BOOKING CONFLICT CHECK
+     * ---------------------------------------------------
+     *
+     * We do this inside the transaction so the
+     * availability decision is based on current data.
+     */
+
+    const range = getBookingTimeRange(booking);
+
+    if (!range) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Booking time information is invalid.",
+      );
+    }
+
+    const existingBookingsQuery = db
+      .collection("bookings")
+      .where("maidId", "==", maidId);
+
+    const existingBookings = await transaction.get(existingBookingsQuery);
+
+    const activeStatuses: BookingStatus[] = [
+      "assigned",
+      "confirmed",
+      "in_progress",
+    ];
+
+    for (const existingDoc of existingBookings.docs) {
+      /*
+       * Ignore the current booking.
+       */
+      if (existingDoc.id === bookingId) {
+        continue;
+      }
+
+      const existingBooking = existingDoc.data() as Booking;
+
+      if (!activeStatuses.includes(existingBooking.status as BookingStatus)) {
+        continue;
+      }
+
+      if (!existingBooking.scheduledDateTime) {
+        continue;
+      }
+
+      const existingRange = getBookingTimeRange(existingBooking);
+
+      if (!existingRange) {
+        continue;
+      }
+
+      const overlaps =
+        range.start.getTime() < existingRange.end.getTime() &&
+        range.end.getTime() > existingRange.start.getTime();
+
+      if (overlaps) {
+        throw new HttpsError(
+          "failed-precondition",
+          "You already have another booking at this time.",
+        );
+      }
+    }
+
+    /*
+     * ---------------------------------------------------
+     * FIRST ACCEPT WINS
+     * ---------------------------------------------------
+     *
+     * This update is atomic with the transaction.
+     *
+     * If another maid has already changed the booking,
+     * Firestore retries the transaction and the next
+     * read sees status !== pending.
+     */
+
+    const responsePath = `maidResponses.${maidId}`;
+
+    transaction.update(bookingRef, {
+      status: "confirmed",
+
+      maidId,
+
+      winningMaidId: maidId,
+
+      assignedAt: FieldValue.serverTimestamp(),
+
+      respondedAt: FieldValue.serverTimestamp(),
+
+      updatedAt: FieldValue.serverTimestamp(),
+
+      [responsePath]: "accepted",
+    });
+
+    /*
+     * Track maid usage.
+     */
+    transaction.update(maidRef, {
+      lastAssignedAt: FieldValue.serverTimestamp(),
+    });
+
+    accepted = true;
+  });
+
+  if (!accepted) {
+    throw new HttpsError("aborted", "Unable to accept this booking.");
+  }
+
+  console.log(`Maid ${maidId} WON booking ${bookingId}`);
+
+  return {
+    success: true,
+    bookingId,
+    maidId,
+    status: "confirmed",
+  };
+});
+
+/* =========================================================
+   REJECT BOOKING
+========================================================= */
+
+/**
+ * Rejecting a request MUST NOT make the booking pending
+ * again and MUST NOT send it to another single maid.
+ *
+ * All eligible maids already received the request.
+ *
+ * Therefore rejection only records the response of the
+ * current maid.
+ */
+export const rejectBooking = onCall(async (request) => {
+  /*
+   * -------------------------------------------------------
+   * AUTHENTICATION
+   * -------------------------------------------------------
+   */
+
+  if (!request.auth) {
+    throw new HttpsError("unauthenticated", "You must be logged in as a maid.");
+  }
+
+  const maidId = request.auth.uid;
+
+  /*
+   * -------------------------------------------------------
+   * VALIDATE INPUT
+   * -------------------------------------------------------
+   */
+
+  const bookingId =
+    typeof request.data?.bookingId === "string"
+      ? request.data.bookingId.trim()
+      : "";
+
+  const isTimeout = request.data?.isTimeout === true;
+
+  if (!bookingId) {
+    throw new HttpsError("invalid-argument", "bookingId is required.");
+  }
+
+  const bookingRef = db.collection("bookings").doc(bookingId);
+
+  /*
+   * -------------------------------------------------------
+   * TRANSACTION
+   * -------------------------------------------------------
+   */
+
+  await db.runTransaction(async (transaction) => {
+    const bookingSnapshot = await transaction.get(bookingRef);
+
+    if (!bookingSnapshot.exists) {
+      throw new HttpsError("not-found", "Booking not found.");
+    }
+
+    const booking = bookingSnapshot.data() as Booking;
+
+    /*
+     * If another maid already accepted,
+     * this request is simply closed.
+     */
+    if (booking.status !== "pending") {
+      throw new HttpsError(
+        "failed-precondition",
+        "This booking is no longer available.",
+      );
+    }
+
+    const offeredMaidIds = booking.offeredMaidIds ?? [];
+
+    if (!offeredMaidIds.includes(maidId)) {
+      throw new HttpsError(
+        "permission-denied",
+        "You did not receive this booking request.",
+      );
+    }
+
+    const responsePath = `maidResponses.${maidId}`;
+
+    transaction.update(bookingRef, {
+      [responsePath]: isTimeout ? "timeout" : "rejected",
+
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+  });
+
+  console.log(
+    `Maid ${maidId} ${isTimeout ? "timed out" : "rejected"} booking ${bookingId}`,
+  );
+
+  return {
+    success: true,
+    bookingId,
+    maidId,
+    response: isTimeout ? "timeout" : "rejected",
+  };
+});
+
+/* =========================================================
+   BOOKING STATUS NOTIFICATIONS
+========================================================= */
 
 export const bookingStatusNotification = onDocumentUpdated(
   "bookings/{bookingId}",
   async (event) => {
     const before = event.data?.before.data();
+
     const after = event.data?.after.data();
 
     if (!before || !after) {
@@ -853,9 +1269,20 @@ export const bookingStatusNotification = onDocumentUpdated(
     const bookingId = event.params.bookingId;
 
     const oldStatus = before.status as BookingStatus;
+
     const newStatus = after.status as BookingStatus;
 
-    // No status change
+    /*
+     * -------------------------------------------------------
+     * NO STATUS CHANGE
+     * -------------------------------------------------------
+     *
+     * Important:
+     *
+     * maidResponses changes should NOT trigger any
+     * customer notification.
+     */
+
     if (oldStatus === newStatus) {
       return;
     }
@@ -868,99 +1295,128 @@ export const bookingStatusNotification = onDocumentUpdated(
 
     const maidId = after.maidId as string | null | undefined;
 
-    // ---------------------------------------------------
-    // ASSIGNED → MAID
-    // ---------------------------------------------------
-
-    if (newStatus === "assigned" && maidId) {
-      await createNotification({
-        recipientId: maidId,
-        recipientRole: "maid",
-        type: "booking_assigned",
-        title: "New Booking Request",
-        body: "You have received a new booking request.",
-        bookingId,
-      });
-
-      return;
-    }
-
-    // ---------------------------------------------------
-    // CONFIRMED → CUSTOMER
-    // ---------------------------------------------------
+    /*
+     * -------------------------------------------------------
+     * CONFIRMED → CUSTOMER
+     * -------------------------------------------------------
+     *
+     * This is now the point where a maid actually wins
+     * the booking.
+     */
 
     if (newStatus === "confirmed" && customerId) {
       await createNotification({
         recipientId: customerId,
+
         recipientRole: "customer",
+
         type: "booking_confirmed",
+
         title: "Booking Confirmed",
+
         body: "Your helper has accepted the booking.",
+
         bookingId,
       });
 
       return;
     }
 
-    // ---------------------------------------------------
-    // IN PROGRESS → CUSTOMER
-    // ---------------------------------------------------
+    /*
+     * -------------------------------------------------------
+     * IN PROGRESS → CUSTOMER
+     * -------------------------------------------------------
+     */
 
     if (newStatus === "in_progress" && customerId) {
       await createNotification({
         recipientId: customerId,
+
         recipientRole: "customer",
+
         type: "booking_started",
+
         title: "Job Started",
+
         body: "Your helper has started the job.",
+
         bookingId,
       });
 
       return;
     }
 
-    // ---------------------------------------------------
-    // COMPLETED → CUSTOMER
-    // ---------------------------------------------------
+    /*
+     * -------------------------------------------------------
+     * COMPLETED → CUSTOMER
+     * -------------------------------------------------------
+     */
 
     if (newStatus === "completed" && customerId) {
       await createNotification({
         recipientId: customerId,
+
         recipientRole: "customer",
+
         type: "booking_completed",
+
         title: "Job Completed",
+
         body: "Your booking has been completed successfully.",
+
         bookingId,
       });
 
       return;
     }
 
-    // ---------------------------------------------------
-    // CANCELLED → OTHER PERSON
-    // ---------------------------------------------------
+    /*
+     * -------------------------------------------------------
+     * CANCELLED
+     * -------------------------------------------------------
+     */
 
     if (newStatus === "cancelled") {
+      /*
+       * Customer cancelled.
+       * Notify winning maid.
+       */
+
       if (after.cancelledBy === "customer" && maidId) {
         await createNotification({
           recipientId: maidId,
+
           recipientRole: "maid",
+
           type: "booking_cancelled",
+
           title: "Booking Cancelled",
+
           body: "The customer has cancelled the booking.",
+
           bookingId,
         });
 
         return;
       }
 
+      /*
+       * Maid cancelled.
+       * Notify customer.
+       */
+
       if (after.cancelledBy === "maid" && customerId) {
         await createNotification({
           recipientId: customerId,
+
           recipientRole: "customer",
+
           type: "booking_cancelled",
+
           title: "Booking Cancelled",
+
           body: "The helper has cancelled the booking.",
+
           bookingId,
         });
 
@@ -968,17 +1424,24 @@ export const bookingStatusNotification = onDocumentUpdated(
       }
     }
 
-    // ---------------------------------------------------
-    // NO MAID FOUND → CUSTOMER
-    // ---------------------------------------------------
+    /*
+     * -------------------------------------------------------
+     * NO MAID FOUND → CUSTOMER
+     * -------------------------------------------------------
+     */
 
     if (newStatus === "no_maid_found" && customerId) {
       await createNotification({
         recipientId: customerId,
+
         recipientRole: "customer",
+
         type: "no_maid_found",
+
         title: "No Helper Available",
+
         body: "Sorry, no helper is currently available for your booking.",
+
         bookingId,
       });
     }

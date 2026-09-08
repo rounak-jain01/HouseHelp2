@@ -15,49 +15,217 @@ import {
   getFirestore,
   doc,
   getDoc,
-  updateDoc,
+  onSnapshot,
 } from "@react-native-firebase/firestore";
+import {
+  getAuth,
+} from "@react-native-firebase/auth";
+import {
+  getFunctions,
+  httpsCallable,
+} from "@react-native-firebase/functions";
 
-const db = getFirestore(getApp());
+const app = getApp();
+
+const db = getFirestore(app);
+const auth = getAuth(app);
+const functions = getFunctions(app, "asia-south1");
+
+type Booking = {
+  customerId?: string;
+  maidId?: string | null;
+
+  categories?: string[];
+
+  duration?: number;
+
+  scheduledDateTime?: any;
+
+  status?: string;
+
+  customerName?: string;
+
+  customerAddress?: {
+    formattedAddress?: string;
+    latitude?: number | null;
+    longitude?: number | null;
+    landmark?: string | null;
+  };
+
+  totalPrice?: number;
+
+  offeredMaidIds?: string[];
+
+  maidResponses?: Record<
+    string,
+    "accepted" | "rejected" | "timeout"
+  >;
+
+  winningMaidId?: string | null;
+
+  createdAt?: any;
+};
+
+type CallableResponse = {
+  success?: boolean;
+  bookingId?: string;
+  message?: string;
+};
 
 export default function BookingRequestScreen() {
-  const { bookingId } = useLocalSearchParams<{ bookingId: string }>();
+  const { bookingId } =
+    useLocalSearchParams<{ bookingId: string }>();
 
-  const [booking, setBooking] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-  const [responding, setResponding] = useState(false);
-  const [secondsLeft, setSecondsLeft] = useState(180);
+  const [booking, setBooking] =
+    useState<Booking | null>(null);
 
+  const [loading, setLoading] =
+    useState(true);
+
+  const [responding, setResponding] =
+    useState(false);
+
+  const [secondsLeft, setSecondsLeft] =
+    useState(180);
+
+  const [requestClosed, setRequestClosed] =
+    useState(false);
+
+  const maidId = auth.currentUser?.uid;
+
+  /*
+   * =========================================================
+   * LOAD + REALTIME BOOKING LISTENER
+   * =========================================================
+   *
+   * Important:
+   *
+   * All eligible maids receive the same booking request.
+   *
+   * If another maid accepts first:
+   *
+   * booking.status = confirmed
+   * booking.maidId = another maid
+   *
+   * This screen detects that change and closes the request.
+   */
   useEffect(() => {
-    if (!bookingId) return;
+    if (!bookingId) {
+      setLoading(false);
+      return;
+    }
 
-    const loadBooking = async () => {
-      try {
-        const bookingSnap = await getDoc(doc(db, "bookings", bookingId));
+    const bookingRef = doc(
+      db,
+      "bookings",
+      bookingId
+    );
 
-        if (!bookingSnap.exists()) {
-          Alert.alert("Error", "Booking not found.");
-          router.back();
+    const unsubscribe = onSnapshot(
+      bookingRef,
+      (snapshot) => {
+        if (!snapshot.exists()) {
+          setLoading(false);
+
+          Alert.alert(
+            "Booking Not Found",
+            "This booking request is no longer available.",
+            [
+              {
+                text: "OK",
+                onPress: () => router.back(),
+              },
+            ]
+          );
+
           return;
         }
 
-        const data = bookingSnap.data();
+        const data =
+          snapshot.data() as Booking;
 
         setBooking(data);
-      } catch (error) {
-        console.log("Booking request error:", error);
-        Alert.alert("Error", "Unable to load booking.");
-      } finally {
         setLoading(false);
+
+        /*
+         * -----------------------------------------------------
+         * REQUEST NO LONGER AVAILABLE
+         * -----------------------------------------------------
+         *
+         * If another maid accepted first, booking becomes
+         * confirmed and maidId belongs to that maid.
+         */
+        if (
+          data.status === "confirmed" &&
+          data.maidId &&
+          data.maidId !== maidId
+        ) {
+          setRequestClosed(true);
+          setResponding(true);
+          return;
+        }
+
+        /*
+         * If booking was cancelled or no maid was found,
+         * this request should also close.
+         */
+        if (
+          data.status === "cancelled" ||
+          data.status === "no_maid_found"
+        ) {
+          setRequestClosed(true);
+          setResponding(true);
+        }
+
+        /*
+         * If current maid already responded, prevent
+         * duplicate response.
+         */
+        const myResponse =
+          maidId
+            ? data.maidResponses?.[maidId]
+            : undefined;
+
+        if (
+          myResponse === "accepted" ||
+          myResponse === "rejected" ||
+          myResponse === "timeout"
+        ) {
+          setRequestClosed(true);
+          setResponding(true);
+        }
+      },
+      (error) => {
+        console.log(
+          "Booking realtime listener error:",
+          error
+        );
+
+        setLoading(false);
+
+        Alert.alert(
+          "Error",
+          "Unable to load booking request."
+        );
       }
-    };
+    );
 
-    loadBooking();
-  }, [bookingId]);
+    return () => unsubscribe();
+  }, [bookingId, maidId]);
 
-  // 3-minute countdown
+  /*
+   * =========================================================
+   * 3-MINUTE COUNTDOWN
+   * =========================================================
+   */
   useEffect(() => {
-    if (!booking || responding) return;
+    if (
+      !booking ||
+      responding ||
+      requestClosed
+    ) {
+      return;
+    }
 
     if (secondsLeft <= 0) {
       handleReject(true);
@@ -69,99 +237,286 @@ export default function BookingRequestScreen() {
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [secondsLeft, booking, responding]);
+  }, [
+    secondsLeft,
+    booking,
+    responding,
+    requestClosed,
+  ]);
 
-  const formatTime = (seconds: number) => {
-    const minutes = Math.floor(seconds / 60);
-    const remainingSeconds = seconds % 60;
+  /*
+   * =========================================================
+   * FORMAT TIMER
+   * =========================================================
+   */
+  const formatTime = (
+    seconds: number
+  ) => {
+    const minutes =
+      Math.floor(seconds / 60);
 
-    return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
+    const remainingSeconds =
+      seconds % 60;
+
+    return `${minutes}:${remainingSeconds
+      .toString()
+      .padStart(2, "0")}`;
   };
 
+  /*
+   * =========================================================
+   * FORMAT BOOKING TIME
+   * =========================================================
+   */
   const formatBookingTime = () => {
-    if (!booking?.scheduledDateTime) return "Not available";
+    if (
+      !booking?.scheduledDateTime
+    ) {
+      return "Not available";
+    }
 
-    const date = booking.scheduledDateTime.toDate();
+    try {
+      const date =
+        booking.scheduledDateTime.toDate();
 
-    return date.toLocaleString("en-IN", {
-      day: "2-digit",
-      month: "short",
-      year: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
+      return date.toLocaleString(
+        "en-IN",
+        {
+          day: "2-digit",
+          month: "short",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        }
+      );
+    } catch (error) {
+      console.log(
+        "Date formatting error:",
+        error
+      );
+
+      return "Not available";
+    }
   };
 
+  /*
+   * =========================================================
+   * ACCEPT BOOKING
+   * =========================================================
+   *
+   * IMPORTANT:
+   *
+   * We DO NOT update Firestore directly.
+   *
+   * Backend callable function handles:
+   *
+   * pending check
+   * maid eligibility
+   * conflict check
+   * transaction
+   * first-accept-wins logic
+   */
   const handleAccept = async () => {
-  if (!bookingId || responding) return;
-
-  try {
-    setResponding(true);
-
-    await updateDoc(doc(db, "bookings", bookingId), {
-      status: "confirmed",
-      maidResponse: "accepted",
-      respondedAt: new Date(),
-    });
-
-    // Directly open Active Booking
-    router.replace({
-      pathname: "/maid/active-booking",
-      params: {
-        bookingId: bookingId,
-      },
-    });
-  } catch (error) {
-    console.log("Accept error:", error);
-
-    setResponding(false);
-
-    Alert.alert(
-      "Error",
-      "Could not accept this booking. Please try again."
-    );
-  }
-};
-
-  const handleReject = async (isTimeout = false) => {
-    if (!bookingId || responding) return;
+    if (
+      !bookingId ||
+      !maidId ||
+      responding ||
+      requestClosed
+    ) {
+      return;
+    }
 
     try {
       setResponding(true);
 
-      await updateDoc(doc(db, "bookings", bookingId), {
-        status: "pending",
-        maidId: null,
-        maidResponse: isTimeout ? "timeout" : "rejected",
-        respondedAt: new Date(),
-      });
+      const acceptBooking =
+        httpsCallable<
+          { bookingId: string },
+          CallableResponse
+        >(
+          functions,
+          "acceptBooking"
+        );
 
-      Alert.alert(
-        isTimeout ? "Request Expired" : "Booking Rejected",
-        isTimeout
-          ? "The response time expired."
-          : "The booking will be offered to another maid.",
-        [
-          {
-            text: "OK",
-            onPress: () => router.replace("/maid"),
-          },
-        ],
+      const result =
+        await acceptBooking({
+          bookingId,
+        });
+
+      console.log(
+        "Accept booking result:",
+        result.data
       );
-    } catch (error) {
-      console.log("Reject error:", error);
+
+      /*
+       * Backend accepted this maid.
+       *
+       * Navigate to active booking.
+       */
+      router.replace({
+        pathname:
+          "/maid/active-booking",
+        params: {
+          bookingId,
+        },
+      });
+    } catch (error: any) {
+      console.log(
+        "Accept booking error:",
+        error
+      );
 
       setResponding(false);
 
-      Alert.alert("Error", "Could not reject this booking. Please try again.");
+      /*
+       * If another maid accepted first,
+       * backend will reject this accept.
+       *
+       * Do not show another Alert.
+       * Just close this request.
+       */
+      setRequestClosed(true);
     }
   };
 
+  /*
+   * =========================================================
+   * REJECT / TIMEOUT
+   * =========================================================
+   *
+   * Rejecting this maid does NOT change booking status.
+   *
+   * It only records:
+   *
+   * maidResponses[maidId] = rejected
+   *
+   * or
+   *
+   * maidResponses[maidId] = timeout
+   */
+  const handleReject = async (
+    isTimeout = false
+  ) => {
+    if (
+      !bookingId ||
+      !maidId ||
+      responding ||
+      requestClosed
+    ) {
+      return;
+    }
+
+    try {
+      setResponding(true);
+
+      const rejectBooking =
+        httpsCallable<
+          {
+            bookingId: string;
+            response:
+              | "rejected"
+              | "timeout";
+          },
+          CallableResponse
+        >(
+          functions,
+          "rejectBooking"
+        );
+
+      const result =
+        await rejectBooking({
+          bookingId,
+          response: isTimeout
+            ? "timeout"
+            : "rejected",
+        });
+
+      console.log(
+        "Reject booking result:",
+        result.data
+      );
+
+      setRequestClosed(true);
+
+      router.replace("/maid");
+    } catch (error: any) {
+      console.log(
+        "Reject booking error:",
+        error
+      );
+
+      setResponding(false);
+    }
+  };
+
+  /*
+   * =========================================================
+   * LOADING
+   * =========================================================
+   */
   if (loading) {
     return (
       <View style={styles.center}>
-        <ActivityIndicator size="large" />
-        <Text style={styles.loadingText}>Loading booking request...</Text>
+        <ActivityIndicator
+          size="large"
+        />
+
+        <Text style={styles.loadingText}>
+          Loading booking request...
+        </Text>
+      </View>
+    );
+  }
+
+  /*
+   * =========================================================
+   * REQUEST CLOSED
+   * =========================================================
+   */
+  if (
+    requestClosed &&
+    booking?.status === "confirmed" &&
+    booking.maidId !== maidId
+  ) {
+    return (
+      <View style={styles.center}>
+        <View
+          style={styles.closedCard}
+        >
+          <Text
+            style={styles.closedIcon}
+          >
+            ✓
+          </Text>
+
+          <Text
+            style={styles.closedTitle}
+          >
+            Booking Taken
+          </Text>
+
+          <Text
+            style={styles.closedMessage}
+          >
+            Another helper accepted this
+            booking first.
+          </Text>
+
+          <Pressable
+            style={styles.closedButton}
+            onPress={() =>
+              router.replace("/maid")
+            }
+          >
+            <Text
+              style={
+                styles.closedButtonText
+              }
+            >
+              Go to Home
+            </Text>
+          </Pressable>
+        </View>
       </View>
     );
   }
@@ -170,103 +525,323 @@ export default function BookingRequestScreen() {
     return null;
   }
 
-  const categories = booking.categories || [];
+  /*
+   * =========================================================
+   * CURRENT MAID RESPONSE
+   * =========================================================
+   */
+  const myResponse =
+    maidId
+      ? booking.maidResponses?.[maidId]
+      : undefined;
 
+  /*
+   * =========================================================
+   * REQUEST NOT OFFERED TO THIS MAID
+   * =========================================================
+   */
+  const isOfferedToMe =
+    maidId
+      ? booking.offeredMaidIds?.includes(
+          maidId
+        )
+      : false;
+
+  if (
+    !isOfferedToMe &&
+    booking.status === "pending"
+  ) {
+    return (
+      <View style={styles.center}>
+        <View
+          style={styles.closedCard}
+        >
+          <Text
+            style={styles.closedIcon}
+          >
+            !
+          </Text>
+
+          <Text
+            style={styles.closedTitle}
+          >
+            Request Unavailable
+          </Text>
+
+          <Text
+            style={styles.closedMessage}
+          >
+            This booking request is not
+            available for your account.
+          </Text>
+
+          <Pressable
+            style={styles.closedButton}
+            onPress={() =>
+              router.replace("/maid")
+            }
+          >
+            <Text
+              style={
+                styles.closedButtonText
+              }
+            >
+              Go to Home
+            </Text>
+          </Pressable>
+        </View>
+      </View>
+    );
+  }
+
+  const categories =
+    booking.categories || [];
+
+  /*
+   * =========================================================
+   * MAIN UI
+   * =========================================================
+   */
   return (
     <View style={styles.container}>
       <ScrollView
-        contentContainerStyle={styles.content}
-        showsVerticalScrollIndicator={false}
+        contentContainerStyle={
+          styles.content
+        }
+        showsVerticalScrollIndicator={
+          false
+        }
       >
+        {/* HEADER */}
         <View style={styles.header}>
-          <Text style={styles.title}>New Booking Request</Text>
+          <Text style={styles.title}>
+            New Booking Request
+          </Text>
 
           <View style={styles.timer}>
-            <Text style={styles.timerLabel}>Respond within</Text>
-            <Text style={styles.timerValue}>{formatTime(secondsLeft)}</Text>
+            <Text
+              style={styles.timerLabel}
+            >
+              Respond within
+            </Text>
+
+            <Text
+              style={styles.timerValue}
+            >
+              {formatTime(secondsLeft)}
+            </Text>
           </View>
         </View>
 
-        <View style={styles.customerCard}>
-          <Text style={styles.sectionLabel}>CUSTOMER</Text>
-
-          <Text style={styles.customerName}>
-            {booking.customerName || "Customer"}
+        {/* CUSTOMER */}
+        <View
+          style={styles.customerCard}
+        >
+          <Text
+            style={styles.sectionLabel}
+          >
+            CUSTOMER
           </Text>
 
-          <Text style={styles.address}>
-            {booking.customerAddress?.formattedAddress ||
+          <Text
+            style={styles.customerName}
+          >
+            {booking.customerName ||
+              "Customer"}
+          </Text>
+
+          <Text
+            style={styles.address}
+          >
+            {booking.customerAddress
+              ?.formattedAddress ||
               "Address not available"}
           </Text>
 
-          {booking.customerAddress?.landmark ? (
-            <Text style={styles.landmark}>
-              Landmark: {booking.customerAddress.landmark}
+          {booking.customerAddress
+            ?.landmark ? (
+            <Text
+              style={styles.landmark}
+            >
+              Landmark:{" "}
+              {
+                booking
+                  .customerAddress
+                  .landmark
+              }
             </Text>
           ) : null}
         </View>
 
+        {/* BOOKING DETAILS */}
         <View style={styles.card}>
-          <Text style={styles.sectionLabel}>BOOKING DETAILS</Text>
+          <Text
+            style={styles.sectionLabel}
+          >
+            BOOKING DETAILS
+          </Text>
 
           <View style={styles.row}>
-            <Text style={styles.label}>Date & Time</Text>
-            <Text style={styles.value}>{formatBookingTime()}</Text>
-          </View>
+            <Text style={styles.label}>
+              Date & Time
+            </Text>
 
-          <View style={styles.row}>
-            <Text style={styles.label}>Duration</Text>
             <Text style={styles.value}>
-              {booking.duration} hour
-              {booking.duration > 1 ? "s" : ""}
+              {formatBookingTime()}
             </Text>
           </View>
 
           <View style={styles.row}>
-            <Text style={styles.label}>Distance</Text>
-            <Text style={styles.value}>Not available yet</Text>
+            <Text style={styles.label}>
+              Duration
+            </Text>
+
+            <Text style={styles.value}>
+              {booking.duration || 0} hour
+              {booking.duration &&
+              booking.duration > 1
+                ? "s"
+                : ""}
+            </Text>
+          </View>
+
+          <View style={styles.row}>
+            <Text style={styles.label}>
+              Distance
+            </Text>
+
+            <Text style={styles.value}>
+              Not available yet
+            </Text>
           </View>
         </View>
 
+        {/* REQUESTED SERVICES */}
         <View style={styles.card}>
-          <Text style={styles.sectionLabel}>REQUESTED SERVICES</Text>
-
-          {categories.map((category: string, index: number) => (
-            <View key={`${category}-${index}`} style={styles.category}>
-              <Text style={styles.categoryText}>{category}</Text>
-            </View>
-          ))}
-        </View>
-
-        <View style={styles.earningCard}>
-          <Text style={styles.earningLabel}>YOUR EARNING</Text>
-
-          <Text style={styles.earningAmount}>₹{booking.totalPrice || 0}</Text>
-
-          <Text style={styles.earningNote}>Earnings for this booking</Text>
-        </View>
-
-        <View style={styles.actions}>
-          <Pressable
-            style={[styles.acceptButton, responding && styles.disabledButton]}
-            disabled={responding}
-            onPress={handleAccept}
+          <Text
+            style={styles.sectionLabel}
           >
-            {responding ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <Text style={styles.acceptText}>Accept Booking</Text>
-            )}
-          </Pressable>
+            REQUESTED SERVICES
+          </Text>
 
-          <Pressable
-            style={[styles.rejectButton, responding && styles.disabledButton]}
-            disabled={responding}
-            onPress={() => handleReject(false)}
-          >
-            <Text style={styles.rejectText}>Reject</Text>
-          </Pressable>
+          {categories.map(
+            (
+              category: string,
+              index: number
+            ) => (
+              <View
+                key={`${category}-${index}`}
+                style={styles.category}
+              >
+                <Text
+                  style={
+                    styles.categoryText
+                  }
+                >
+                  {category}
+                </Text>
+              </View>
+            )
+          )}
         </View>
+
+        {/* EARNING */}
+        <View
+          style={styles.earningCard}
+        >
+          <Text
+            style={styles.earningLabel}
+          >
+            YOUR EARNING
+          </Text>
+
+          <Text
+            style={styles.earningAmount}
+          >
+            ₹{booking.totalPrice || 0}
+          </Text>
+
+          <Text
+            style={styles.earningNote}
+          >
+            Earnings for this booking
+          </Text>
+        </View>
+
+        {/* ALREADY RESPONDED */}
+        {myResponse ? (
+          <View
+            style={styles.responseCard}
+          >
+            <Text
+              style={styles.responseTitle}
+            >
+              {myResponse === "accepted"
+                ? "Booking Accepted"
+                : myResponse ===
+                    "timeout"
+                  ? "Request Expired"
+                  : "Booking Rejected"}
+            </Text>
+
+            <Text
+              style={
+                styles.responseMessage
+              }
+            >
+              {myResponse ===
+              "accepted"
+                ? "Opening your active booking..."
+                : "This booking request is no longer available."}
+            </Text>
+          </View>
+        ) : null}
+
+        {/* ACTIONS */}
+        {!requestClosed &&
+        !myResponse ? (
+          <View style={styles.actions}>
+            <Pressable
+              style={[
+                styles.acceptButton,
+                responding &&
+                  styles.disabledButton,
+              ]}
+              disabled={responding}
+              onPress={handleAccept}
+            >
+              {responding ? (
+                <ActivityIndicator
+                  color="#fff"
+                />
+              ) : (
+                <Text
+                  style={styles.acceptText}
+                >
+                  Accept Booking
+                </Text>
+              )}
+            </Pressable>
+
+            <Pressable
+              style={[
+                styles.rejectButton,
+                responding &&
+                  styles.disabledButton,
+              ]}
+              disabled={responding}
+              onPress={() =>
+                handleReject(false)
+              }
+            >
+              <Text
+                style={styles.rejectText}
+              >
+                Reject
+              </Text>
+            </Pressable>
+          </View>
+        ) : null}
       </ScrollView>
     </View>
   );
@@ -288,6 +863,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     alignItems: "center",
     backgroundColor: "#F7F8FA",
+    padding: 20,
   },
 
   loadingText: {
@@ -437,6 +1013,27 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
 
+  responseCard: {
+    backgroundColor: "#EFF6FF",
+    borderRadius: 18,
+    padding: 18,
+    marginBottom: 20,
+    alignItems: "center",
+  },
+
+  responseTitle: {
+    fontSize: 17,
+    fontWeight: "800",
+    color: "#1D4ED8",
+  },
+
+  responseMessage: {
+    marginTop: 6,
+    fontSize: 13,
+    color: "#475569",
+    textAlign: "center",
+  },
+
   actions: {
     gap: 12,
   },
@@ -471,5 +1068,58 @@ const styles = StyleSheet.create({
 
   disabledButton: {
     opacity: 0.6,
+  },
+
+  closedCard: {
+    width: "100%",
+    maxWidth: 380,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 22,
+    padding: 25,
+    alignItems: "center",
+  },
+
+  closedIcon: {
+    width: 58,
+    height: 58,
+    borderRadius: 29,
+    backgroundColor: "#E8F7EE",
+    textAlign: "center",
+    textAlignVertical: "center",
+    fontSize: 30,
+    fontWeight: "800",
+    color: "#16A34A",
+    marginBottom: 15,
+    overflow: "hidden",
+  },
+
+  closedTitle: {
+    fontSize: 22,
+    fontWeight: "800",
+    color: "#111827",
+    marginBottom: 8,
+  },
+
+  closedMessage: {
+    fontSize: 14,
+    lineHeight: 21,
+    color: "#6B7280",
+    textAlign: "center",
+    marginBottom: 20,
+  },
+
+  closedButton: {
+    width: "100%",
+    height: 52,
+    borderRadius: 15,
+    backgroundColor: "#111827",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+
+  closedButtonText: {
+    color: "#FFFFFF",
+    fontSize: 16,
+    fontWeight: "700",
   },
 });
