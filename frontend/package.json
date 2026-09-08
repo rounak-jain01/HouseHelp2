@@ -52,8 +52,5 @@
     "web": "expo start --web",
     "lint": "expo lint"
   },
-  "plugins": [
-    "@notifee/react-native"
-  ],
   "private": true
 }
